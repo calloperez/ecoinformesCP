@@ -266,7 +266,7 @@ table.rp-duo .rp-duo-title th{font-size:10px;letter-spacing:.05em;text-transform
   color:var(--ink);border-bottom:1px solid var(--ink);padding:2px 5px;text-align:left;}
 table.rp-duo td.sep, table.rp-duo th.sep{border-left:1px solid var(--line);padding-left:12px;}
 
-.rp-text{font-size:12px;line-height:1.45;white-space:pre-wrap;width:100%;font-family:'Georgia',serif;
+.rp-text{font-size:10.5px;line-height:1.4;white-space:pre-wrap;width:100%;font-family:'Georgia',serif;
   color:var(--ink);min-height:1.6em;}
 .rp-text:focus{outline:1px dashed var(--gray-3);}
 
@@ -343,7 +343,7 @@ table.rp-duo td.sep, table.rp-duo th.sep{border-left:1px solid var(--line);paddi
     <div class="sidebar-foot">
       <button class="btn" id="btnNewPatient">+ Nuevo paciente</button>
       <div id="syncStatus" style="text-align:center;font-size:10px;color:var(--gray-3);margin-top:6px;">●  En línea</div>
-      <div style="text-align:center;font-size:10px;color:var(--gray-3);margin-top:2px;">build 2026-07-08-r55</div>
+      <div style="text-align:center;font-size:10px;color:var(--gray-3);margin-top:2px;">build 2026-07-08-r56</div>
     </div>
   </div>
   <div class="main" id="main"></div>
@@ -1769,8 +1769,8 @@ const PdfService = (()=>{
 
       const isSafari=/^((?!chrome|android).)*safari/i.test(navigator.userAgent);
       const fullW=el.scrollWidth, fullH=el.scrollHeight;
-      let scale=2;
-      if(fullH*scale>(isSafari?14000:16000)) scale=Math.max(1,Math.floor((isSafari?14000:16000)/fullH*10)/10);
+      let scale=2.5;
+      if(fullH*scale>(isSafari?14000:16000)) scale=Math.max(1.5,Math.floor((isSafari?14000:16000)/fullH*10)/10);
       const canvas=await html2canvas(el,{scale,backgroundColor:'#FFFFFF',useCORS:true,
         width:fullW,height:fullH,windowWidth:fullW,windowHeight:fullH,scrollX:0,scrollY:0});
 
@@ -1817,9 +1817,20 @@ const PdfService = (()=>{
       el.querySelectorAll('.rp-section').forEach(s=>{
         const r=s.getBoundingClientRect();
         const top=(r.top-elTop)*scale, bot=(r.bottom-elTop)*scale;
-        guards.push([top, bot + 2.4*(bot-top)]);
+        guards.push([top, bot + 1.15*(bot-top)]); // protege título + ~1 renglón (no más)
       });
       breaks=breaks.filter(b=> b===0 || b===canvas.height || !guards.some(g=> b>g[0] && b<g[1]));
+
+      /* Corte forzado antes de la sección IMÁGENES: las imágenes arrancan siempre en
+         hoja nueva (el Dr. las monta aparte y decide cuántas). Esto además libera a las
+         conclusiones de ser "arrastradas" por las imágenes, así descripción y conclusión
+         quedan seguidas. */
+      let forcedBreak = Infinity;
+      el.querySelectorAll('.rp-section').forEach(s=>{
+        if((s.textContent||'').trim().toLowerCase() === 'imágenes'){
+          forcedBreak = (s.getBoundingClientRect().top - elTop) * scale;
+        }
+      });
 
       el.style.cssText=prevStyle;
       if(sp) sp.scrollTop=prevScroll;
@@ -1830,7 +1841,7 @@ const PdfService = (()=>{
       const {jsPDF}=window.jspdf;
       const pdf=new jsPDF('p','mm','a4');
       /* Márgenes: laterales finos (mmX) por pedido; verticales (mmY) con algo más de aire. */
-      const mmX=8, mmY=10, pW=210-mmX*2, pH=297-mmY*2;
+      const mmX=8, mmY=15, pW=210-mmX*2, pH=297-mmY*2;
       const pxMM=canvas.width/pW;
       /* Colchón de seguridad: cada hoja corta ~2.5mm ANTES del borde útil real. Absorbe
          la diferencia entre las posiciones medidas en el DOM y cómo html2canvas rasteriza
@@ -1880,6 +1891,9 @@ const PdfService = (()=>{
         let chosen=null;
         breaks.forEach(b=>{ if(b>cursor&&b<=target) chosen=b; });
         if(chosen===null||chosen<=cursor) chosen=target;
+        /* Si la página alcanzaría la sección de imágenes, se corta justo antes para que
+           las imágenes empiecen en hoja nueva. */
+        if(forcedBreak>cursor && forcedBreak<chosen) chosen=forcedBreak;
         /* Respeta el corte si ya cae en un blanco; si cae sobre una letra, lo lleva al
            blanco más cercano. Si no puede avanzar, mantiene el corte original. */
         const snapped=snapClean(chosen);
@@ -1889,7 +1903,7 @@ const PdfService = (()=>{
         sc.width=canvas.width; sc.height=h;
         sc.getContext('2d').drawImage(canvas,0,cursor,canvas.width,h,0,0,canvas.width,h);
         if(!first) pdf.addPage();
-        pdf.addImage(sc.toDataURL('image/jpeg',0.94),'JPEG',mmX,mmY,pW,Math.min(h/pxMM,pH));
+        pdf.addImage(sc.toDataURL('image/jpeg',0.98),'JPEG',mmX,mmY,pW,Math.min(h/pxMM,pH));
         cursor=chosen; first=false;
       }
 
