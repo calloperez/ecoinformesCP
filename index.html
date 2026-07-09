@@ -343,7 +343,7 @@ table.rp-duo td.sep, table.rp-duo th.sep{border-left:1px solid var(--line);paddi
     <div class="sidebar-foot">
       <button class="btn" id="btnNewPatient">+ Nuevo paciente</button>
       <div id="syncStatus" style="text-align:center;font-size:10px;color:var(--gray-3);margin-top:6px;">●  En línea</div>
-      <div style="text-align:center;font-size:10px;color:var(--gray-3);margin-top:2px;">build 2026-07-08-r57</div>
+      <div style="text-align:center;font-size:10px;color:var(--gray-3);margin-top:2px;">build 2026-07-09-r58</div>
     </div>
   </div>
   <div class="main" id="main"></div>
@@ -1891,14 +1891,25 @@ const PdfService = (()=>{
         breaks.forEach(b=>{ if(b>cursor&&b<=target) chosen=b; });
         if(chosen===null||chosen<=cursor) chosen=target;
         /* Si la página alcanzaría la sección de imágenes, se corta justo antes para que
-           las imágenes empiecen en hoja nueva. */
-        if(forcedBreak>cursor && forcedBreak<chosen) chosen=forcedBreak;
+           las imágenes empiecen en hoja nueva. Solo se fuerza si el bloque previo
+           (resto de descripción + conclusiones) entra en una hoja; si no, se deja que
+           la paginación normal lo divida y las imágenes arrancan más abajo. */
+        let usedForced=false;
+        if(forcedBreak>cursor && forcedBreak<chosen && (forcedBreak-cursor)<=pageH){
+          chosen=forcedBreak; usedForced=true;
+        }
         /* Anti-huérfano: si el corte quedó justo después de un título de sección (con
            menos de ~1.5 renglones debajo), se mueve a ANTES del título para que baje
-           junto con su contenido. Solo mueve el corte elegido: no crea huecos. */
-        for(const t of titleSpans){
-          const th=t[1]-t[0]; // alto del título
-          if(t[0]>cursor && chosen>t[1] && chosen < t[1] + 1.6*th){ chosen=t[0]; break; }
+           junto con su contenido. Solo mueve el corte elegido: no crea huecos.
+           NO se aplica cuando el corte se forzó a IMÁGENES: en ese caso descripción y
+           conclusiones deben quedar juntas en esta hoja. Como CONCLUSIONES tiene poco
+           texto debajo, el guardia la interpretaría como huérfana y la empujaría de más,
+           dejando el hueco grande antes de las imágenes. */
+        if(!usedForced){
+          for(const t of titleSpans){
+            const th=t[1]-t[0]; // alto del título
+            if(t[0]>cursor && chosen>t[1] && chosen < t[1] + 1.6*th){ chosen=t[0]; break; }
+          }
         }
         /* Respeta el corte si ya cae en un blanco; si cae sobre una letra, lo lleva al
            blanco más cercano. Si no puede avanzar, mantiene el corte original. */
