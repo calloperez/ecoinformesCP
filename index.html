@@ -343,7 +343,7 @@ table.rp-duo td.sep, table.rp-duo th.sep{border-left:1px solid var(--line);paddi
     <div class="sidebar-foot">
       <button class="btn" id="btnNewPatient">+ Nuevo paciente</button>
       <div id="syncStatus" style="text-align:center;font-size:10px;color:var(--gray-3);margin-top:6px;">●  En línea</div>
-      <div style="text-align:center;font-size:10px;color:var(--gray-3);margin-top:2px;">build 2026-07-08-r56</div>
+      <div style="text-align:center;font-size:10px;color:var(--gray-3);margin-top:2px;">build 2026-07-08-r57</div>
     </div>
   </div>
   <div class="main" id="main"></div>
@@ -1757,8 +1757,11 @@ const PdfService = (()=>{
       const prevStyle = el.style.cssText;
       el.style.zoom='100%'; el.style.maxWidth='none'; el.style.boxShadow='none';
       const CW={S:1240,M:1040,L:860};
-      const sz=localStorage.getItem('eco_font_size')||'M';
-      el.style.width=(CW[sz]||900)+'px';
+      /* Ancho FIJO para el export, independiente del tamaño de letra elegido en pantalla
+         y del dispositivo. Así el PDF sale IGUAL desde iPhone, Mac, Windows o Android
+         (antes dependía de un ajuste guardado por dispositivo y variaba en cada uno). */
+      const EXPORT_CW=1120;
+      el.style.width=EXPORT_CW+'px';
       /* El ancho lógico del papel (CW) es lo que se mapea al ancho útil A4 (186mm).
          Un CW mayor → la tipografía ocupa menor fracción de la página → entra más por
          página (menos hojas) y el contenido es más ancho (menos envuelto). Reducir el
@@ -1807,19 +1810,15 @@ const PdfService = (()=>{
       });
       breaks.push(canvas.height);
 
-      /* Anti-huérfano: evita que un título de sección quede solo al pie de una hoja,
-         separado de su contenido. Se elimina cualquier corte que caiga justo DEBAJO
-         del título (desde su borde superior hasta ~2 alturas de título más abajo), de
-         modo que el título siempre baje junto con su primera fila/renglón. El corte
-         ANTES del título (en su borde superior) se conserva, para poder empujar la
-         sección entera a la hoja siguiente. */
-      const guards=[];
+      /* Anti-huérfano (no destructivo): guarda la posición de cada título de sección.
+         En el bucle, si un corte cae justo después de un título (con poco contenido
+         debajo), se mueve el corte a ANTES del título. Al no ELIMINAR cortes, nunca
+         genera huecos grandes (a diferencia del método anterior). */
+      const titleSpans=[];
       el.querySelectorAll('.rp-section').forEach(s=>{
         const r=s.getBoundingClientRect();
-        const top=(r.top-elTop)*scale, bot=(r.bottom-elTop)*scale;
-        guards.push([top, bot + 1.15*(bot-top)]); // protege título + ~1 renglón (no más)
+        titleSpans.push([(r.top-elTop)*scale, (r.bottom-elTop)*scale]);
       });
-      breaks=breaks.filter(b=> b===0 || b===canvas.height || !guards.some(g=> b>g[0] && b<g[1]));
 
       /* Corte forzado antes de la sección IMÁGENES: las imágenes arrancan siempre en
          hoja nueva (el Dr. las monta aparte y decide cuántas). Esto además libera a las
@@ -1894,6 +1893,13 @@ const PdfService = (()=>{
         /* Si la página alcanzaría la sección de imágenes, se corta justo antes para que
            las imágenes empiecen en hoja nueva. */
         if(forcedBreak>cursor && forcedBreak<chosen) chosen=forcedBreak;
+        /* Anti-huérfano: si el corte quedó justo después de un título de sección (con
+           menos de ~1.5 renglones debajo), se mueve a ANTES del título para que baje
+           junto con su contenido. Solo mueve el corte elegido: no crea huecos. */
+        for(const t of titleSpans){
+          const th=t[1]-t[0]; // alto del título
+          if(t[0]>cursor && chosen>t[1] && chosen < t[1] + 1.6*th){ chosen=t[0]; break; }
+        }
         /* Respeta el corte si ya cae en un blanco; si cae sobre una letra, lo lleva al
            blanco más cercano. Si no puede avanzar, mantiene el corte original. */
         const snapped=snapClean(chosen);
