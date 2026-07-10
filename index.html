@@ -343,7 +343,7 @@ table.rp-duo td.sep, table.rp-duo th.sep{border-left:1px solid var(--line);paddi
     <div class="sidebar-foot">
       <button class="btn" id="btnNewPatient">+ Nuevo paciente</button>
       <div id="syncStatus" style="text-align:center;font-size:10px;color:var(--gray-3);margin-top:6px;">●  En línea</div>
-      <div style="text-align:center;font-size:10px;color:var(--gray-3);margin-top:2px;">build 2026-07-09-r61-diag</div>
+      <div style="text-align:center;font-size:10px;color:var(--gray-3);margin-top:2px;">build 2026-07-09-r62</div>
     </div>
   </div>
   <div class="main" id="main"></div>
@@ -1828,21 +1828,14 @@ const PdfService = (()=>{
       });
 
       /* Corte forzado antes de la sección IMÁGENES: las imágenes arrancan siempre en
-         hoja nueva (el Dr. las monta aparte y decide cuántas). Esto además libera a las
-         conclusiones de ser "arrastradas" por las imágenes, así descripción y conclusión
-         quedan seguidas. */
+         hoja nueva (el Dr. las monta aparte y decide cuántas). */
       let forcedBreak = Infinity;
+      let descTop = Infinity;
       el.querySelectorAll('.rp-section').forEach(s=>{
-        if((s.textContent||'').trim().toLowerCase() === 'imágenes'){
-          forcedBreak = (s.getBoundingClientRect().top - elTop) * scale;
-        }
-      });
-
-      /* DIAGNÓSTICO TEMPORAL: posiciones (px de canvas) de secciones clave. */
-      const _diag={secs:[],pages:[]};
-      el.querySelectorAll('.rp-section').forEach(s=>{
-        const r=s.getBoundingClientRect();
-        _diag.secs.push((s.textContent||'').trim()+' top='+Math.round((r.top-elTop)*scale));
+        const t=(s.textContent||'').trim().toLowerCase();
+        const top=(s.getBoundingClientRect().top - elTop) * scale;
+        if(t === 'imágenes' || t === 'imagenes') forcedBreak = top;
+        if(t === 'descripción' || t === 'descripcion') descTop = top;
       });
 
       el.style.cssText=prevStyle;
@@ -1898,28 +1891,36 @@ const PdfService = (()=>{
         return yr;
       };
 
-      let cursor=0, first=true;
+      let cursor=0, first=true, imgBreakDone=false;
       while(cursor<canvas.height-1){
         const target=Math.min(cursor+pageH,canvas.height);
         let chosen=null;
         breaks.forEach(b=>{ if(b>cursor&&b<=target) chosen=b; });
         if(chosen===null||chosen<=cursor) chosen=target;
-        const _chNat=chosen; // corte natural antes de forzados/guardas
-        /* Si la página alcanzaría la sección de imágenes, se corta justo antes para que
-           las imágenes empiecen en hoja nueva. Solo se fuerza si el bloque previo
-           (resto de descripción + conclusiones) entra en una hoja; si no, se deja que
-           la paginación normal lo divida y las imágenes arrancan más abajo. */
+
         let usedForced=false;
-        if(isFinite(forcedBreak) && forcedBreak>cursor && forcedBreak<=chosen && (forcedBreak-cursor)<=pageH){
-          chosen=forcedBreak; usedForced=true;
+
+        /* Mantener DESCRIPCIÓN + CONCLUSIONES juntas: si el corte caería DENTRO de ese
+           bloque (entre el inicio de la descripción y el de las imágenes) y la descripción
+           no arranca al tope de esta hoja, se mueve el corte a ANTES de la descripción,
+           para que descripción y conclusiones bajen juntas a la hoja siguiente. Solo si el
+           bloque entra en una hoja; si fuera más alto que una página, se deja que la
+           paginación normal lo divida. */
+        const keepEnd = isFinite(forcedBreak) ? forcedBreak : canvas.height;
+        if(isFinite(descTop) && descTop>cursor && chosen>descTop && chosen<keepEnd && (keepEnd-descTop)<=pageH){
+          chosen=descTop; usedForced=true;
         }
+
+        /* Corte forzado antes de IMÁGENES: arrancan en hoja nueva. imgBreakDone evita que
+           el corte se vuelva a disparar en la misma posición (por decimales del cursor tras
+           el snap), lo que generaba una página de altura casi cero. */
+        if(!imgBreakDone && isFinite(forcedBreak) && forcedBreak>cursor && forcedBreak<=chosen && (forcedBreak-cursor)<=pageH){
+          chosen=forcedBreak; usedForced=true; imgBreakDone=true;
+        }
+
         /* Anti-huérfano: si el corte quedó justo después de un título de sección (con
-           menos de ~1.5 renglones debajo), se mueve a ANTES del título para que baje
-           junto con su contenido. Solo mueve el corte elegido: no crea huecos.
-           NO se aplica cuando el corte se forzó a IMÁGENES: en ese caso descripción y
-           conclusiones deben quedar juntas en esta hoja. Como CONCLUSIONES tiene poco
-           texto debajo, el guardia la interpretaría como huérfana y la empujaría de más,
-           dejando el hueco grande antes de las imágenes. */
+           menos de ~1.5 renglones debajo), se mueve a ANTES del título. NO se aplica si
+           ya se forzó el corte (keep-together o imágenes). */
         if(!usedForced){
           for(const t of titleSpans){
             const th=t[1]-t[0]; // alto del título
@@ -1930,8 +1931,8 @@ const PdfService = (()=>{
            blanco más cercano. Si no puede avanzar, mantiene el corte original. */
         const snapped=snapClean(chosen);
         if(snapped>cursor) chosen=snapped;
-        _diag.pages.push('cur='+Math.round(cursor)+' tgt='+Math.round(target)+' nat='+Math.round(_chNat)+' fB='+(isFinite(forcedBreak)?Math.round(forcedBreak):'INF')+' uF='+(usedForced?1:0)+' fin='+Math.round(chosen));
         const h=chosen-cursor;
+        if(h<=0){ cursor=Math.max(cursor+1,chosen); continue; } // salvaguarda anti página-cero
         const sc=document.createElement('canvas');
         sc.width=canvas.width; sc.height=h;
         sc.getContext('2d').drawImage(canvas,0,cursor,canvas.width,h,0,0,canvas.width,h);
@@ -1939,12 +1940,6 @@ const PdfService = (()=>{
         pdf.addImage(sc.toDataURL('image/jpeg',0.98),'JPEG',mmX,mmY,pW,Math.min(h/pxMM,pH));
         cursor=chosen; first=false;
       }
-
-      /* DIAGNÓSTICO TEMPORAL (r61-diag): muestra las posiciones reales del corte.
-         Sacar foto de este alert y enviarla. Quitar en la próxima versión. */
-      try{
-        alert('DIAG r61  scale='+scale+'  canvasH='+canvas.height+'  pageH='+pageH+'\n\nSECCIONES:\n'+_diag.secs.join('\n')+'\n\nPÁGINAS:\n'+_diag.pages.join('\n'));
-      }catch(e){}
 
       const fileName=(name||'informe').replace(/[^a-z0-9_\-]/gi,'_')+'.pdf';
       const shareTitle=shareText||'Informe de Ecocardiograma Doppler Color';
