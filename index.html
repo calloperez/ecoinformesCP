@@ -343,7 +343,7 @@ table.rp-duo td.sep, table.rp-duo th.sep{border-left:1px solid var(--line);paddi
     <div class="sidebar-foot">
       <button class="btn" id="btnNewPatient">+ Nuevo paciente</button>
       <div id="syncStatus" style="text-align:center;font-size:10px;color:var(--gray-3);margin-top:6px;">●  En línea</div>
-      <div style="text-align:center;font-size:10px;color:var(--gray-3);margin-top:2px;">build 2026-07-09-r58</div>
+      <div style="text-align:center;font-size:10px;color:var(--gray-3);margin-top:2px;">build 2026-07-09-r60</div>
     </div>
   </div>
   <div class="main" id="main"></div>
@@ -1816,6 +1816,13 @@ const PdfService = (()=>{
          genera huecos grandes (a diferencia del método anterior). */
       const titleSpans=[];
       el.querySelectorAll('.rp-section').forEach(s=>{
+        /* CONCLUSIONES e IMÁGENES se excluyen del guarda anti-huérfano: su corte lo
+           maneja el break forzado antes de IMÁGENES. Si se dejaran, el guarda vería
+           poco texto bajo el título de Conclusiones y la empujaría de más, separándola
+           de la Descripción y dejando el hueco grande. El guarda solo debe cuidar las
+           secciones de tablas (Aurícula, Ventrículo, etc.). */
+        const txt=(s.textContent||'').trim().toLowerCase();
+        if(txt==='conclusiones'||txt==='imágenes'||txt==='imagenes') return;
         const r=s.getBoundingClientRect();
         titleSpans.push([(r.top-elTop)*scale, (r.bottom-elTop)*scale]);
       });
@@ -1895,7 +1902,7 @@ const PdfService = (()=>{
            (resto de descripción + conclusiones) entra en una hoja; si no, se deja que
            la paginación normal lo divida y las imágenes arrancan más abajo. */
         let usedForced=false;
-        if(forcedBreak>cursor && forcedBreak<chosen && (forcedBreak-cursor)<=pageH){
+        if(isFinite(forcedBreak) && forcedBreak>cursor && forcedBreak<=chosen && (forcedBreak-cursor)<=pageH){
           chosen=forcedBreak; usedForced=true;
         }
         /* Anti-huérfano: si el corte quedó justo después de un título de sección (con
