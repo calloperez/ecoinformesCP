@@ -264,7 +264,10 @@ table.rp-table td.out{font-weight:700;}
 table.rp-duo{table-layout:fixed;}
 table.rp-duo .rp-duo-title th{font-size:10px;letter-spacing:.05em;text-transform:uppercase;font-weight:700;
   color:var(--ink);border-bottom:1px solid var(--ink);padding:2px 5px;text-align:left;}
-table.rp-duo td.sep, table.rp-duo th.sep{border-left:1px solid var(--line);padding-left:12px;}
+table.rp-duo td.sep, table.rp-duo th.sep{border-left:1px solid var(--line);padding-left:8px;}
+/* Con table-layout:fixed, recorta cualquier derrame horizontal para que un encabezado
+   o etiqueta no se monte sobre la columna vecina (causa del "PARÁMETROVALOR" pisado). */
+table.rp-duo th, table.rp-duo td{overflow:hidden;}
 
 .rp-text{font-size:10.5px;line-height:1.4;white-space:pre-wrap;width:100%;font-family:'Georgia',serif;
   color:var(--ink);min-height:1.6em;}
@@ -343,7 +346,7 @@ table.rp-duo td.sep, table.rp-duo th.sep{border-left:1px solid var(--line);paddi
     <div class="sidebar-foot">
       <button class="btn" id="btnNewPatient">+ Nuevo paciente</button>
       <div id="syncStatus" style="text-align:center;font-size:10px;color:var(--gray-3);margin-top:6px;">●  En línea</div>
-      <div style="text-align:center;font-size:10px;color:var(--gray-3);margin-top:2px;">build 2026-07-09-r63</div>
+      <div style="text-align:center;font-size:10px;color:var(--gray-3);margin-top:2px;">build 2026-07-09-r65-diag</div>
     </div>
   </div>
   <div class="main" id="main"></div>
@@ -1831,11 +1834,18 @@ const PdfService = (()=>{
          hoja nueva (el Dr. las monta aparte y decide cuántas). */
       let forcedBreak = Infinity;
       let descTop = Infinity;
+      const _diag={secs:[],pages:[]};
       el.querySelectorAll('.rp-section').forEach(s=>{
         const t=(s.textContent||'').trim().toLowerCase();
         const top=(s.getBoundingClientRect().top - elTop) * scale;
         if(t === 'imágenes' || t === 'imagenes') forcedBreak = top;
         if(t === 'descripción' || t === 'descripcion') descTop = top;
+        _diag.secs.push((s.textContent||'').trim().slice(0,18)+'='+Math.round(top));
+      });
+      /* también las filas de tablas full-width para ver dónde se parte Circulación */
+      el.querySelectorAll('table.rp-table:not(.rp-duo) tr').forEach(tr=>{
+        const tx=(tr.textContent||'').trim().slice(0,10);
+        if(tx) _diag.secs.push('· '+tx+'='+Math.round((tr.getBoundingClientRect().top-elTop)*scale));
       });
 
       el.style.cssText=prevStyle;
@@ -1914,49 +1924,33 @@ const PdfService = (()=>{
         let chosen=null;
         breaks.forEach(b=>{ if(b>cursor&&b<=target) chosen=b; });
         if(chosen===null||chosen<=cursor) chosen=target;
+        const _nat=chosen; let _rule='nat';
 
         let usedForced=false;
-
-        /* Mantener DESCRIPCIÓN + CONCLUSIONES juntas: si el corte caería DENTRO de ese
-           bloque (entre el inicio de la descripción y el de las imágenes) y la descripción
-           no arranca al tope de esta hoja, se mueve el corte a ANTES de la descripción,
-           para que descripción y conclusiones bajen juntas a la hoja siguiente. Solo si el
-           bloque entra en una hoja; si fuera más alto que una página, se deja que la
-           paginación normal lo divida. */
         const keepEnd = isFinite(forcedBreak) ? forcedBreak : contentH;
         if(isFinite(descTop) && descTop>cursor && chosen>descTop && chosen<keepEnd && (keepEnd-descTop)<=pageH){
-          chosen=descTop; usedForced=true;
+          chosen=descTop; usedForced=true; _rule='keep';
         }
 
-        /* Corte forzado antes de IMÁGENES: arrancan en hoja nueva. imgBreakDone evita que
-           el corte se vuelva a disparar en la misma posición (por decimales del cursor tras
-           el snap), lo que generaba una página de altura casi cero. */
         if(!imgBreakDone && isFinite(forcedBreak) && forcedBreak>cursor && forcedBreak<=chosen && (forcedBreak-cursor)<=pageH){
-          chosen=forcedBreak; usedForced=true; imgBreakDone=true;
+          chosen=forcedBreak; usedForced=true; imgBreakDone=true; _rule='img';
         }
 
-        /* Anti-huérfano: si el corte quedó justo después de un título de sección (con
-           menos de ~1.5 renglones debajo), se mueve a ANTES del título. NO se aplica si
-           ya se forzó el corte (keep-together o imágenes). */
         if(!usedForced){
           for(const t of titleSpans){
-            const th=t[1]-t[0]; // alto del título
-            if(t[0]>cursor && chosen>t[1] && chosen < t[1] + 1.6*th){ chosen=t[0]; break; }
+            const th=t[1]-t[0];
+            if(t[0]>cursor && chosen>t[1] && chosen < t[1] + 1.6*th){ chosen=t[0]; _rule='orphan'; break; }
           }
         }
-        /* Respeta el corte si ya cae en un blanco; si cae sobre una letra, lo lleva al
-           blanco más cercano. Si no puede avanzar, mantiene el corte original. */
         const snapped=snapClean(chosen);
-        if(snapped>cursor) chosen=snapped;
-        /* Anti-viuda del final: si lo que queda hasta el final (contentH) es un resto
-           chico (p. ej. la línea del footer), se absorbe en ESTA hoja en vez de abrir una
-           hoja nueva casi vacía. El pequeño excedente sobre el alto útil lo comprime
-           jsPDF de forma imperceptible. No aplica si el corte se forzó a IMÁGENES. */
+        if(snapped>cursor && snapped!==chosen){ chosen=snapped; if(_rule==='nat')_rule='snap'; }
+        else if(snapped>cursor){ chosen=snapped; }
         if(!usedForced && chosen<contentH && (contentH-chosen) <= 0.20*pageH){
-          chosen=contentH;
+          chosen=contentH; _rule='widow';
         }
+        _diag.pages.push('cur'+Math.round(cursor)+' nat'+Math.round(_nat)+' fB'+(isFinite(forcedBreak)?Math.round(forcedBreak):'INF')+' dT'+(isFinite(descTop)?Math.round(descTop):'INF')+' →'+_rule+' fin'+Math.round(chosen));
         const h=chosen-cursor;
-        if(h<=0){ cursor=Math.max(cursor+1,chosen); continue; } // salvaguarda anti página-cero
+        if(h<=0){ cursor=Math.max(cursor+1,chosen); continue; }
         const sc=document.createElement('canvas');
         sc.width=canvas.width; sc.height=h;
         sc.getContext('2d').drawImage(canvas,0,cursor,canvas.width,h,0,0,canvas.width,h);
@@ -1964,6 +1958,10 @@ const PdfService = (()=>{
         pdf.addImage(sc.toDataURL('image/jpeg',0.98),'JPEG',mmX,mmY,pW,Math.min(h/pxMM,pH));
         cursor=chosen; first=false;
       }
+
+      try{
+        alert('DIAG r65  pageH='+pageH+'  cH='+canvas.height+'  contH='+Math.round(contentH)+'\n\nSECCIONES:\n'+_diag.secs.join('\n')+'\n\nCORTES:\n'+_diag.pages.join('\n'));
+      }catch(e){}
 
       const fileName=(name||'informe').replace(/[^a-z0-9_\-]/gi,'_')+'.pdf';
       const shareTitle=shareText||'Informe de Ecocardiograma Doppler Color';
@@ -2920,8 +2918,8 @@ const App = (()=>{
       return `<table class="rp-table paired rp-duo">
         <tr class="rp-duo-title"><th colspan="3">${a}</th><th colspan="3" class="sep">${b}</th></tr>
         <tr>
-          <th style="width:24%">Parámetro</th><th class="num" style="width:13%">Valor</th><th class="num ref" style="width:13%">Rango</th>
-          <th class="sep" style="width:24%">Parámetro</th><th class="num" style="width:13%">Valor</th><th class="num ref" style="width:13%">Rango</th>
+          <th style="width:28%">Parámetro</th><th class="num" style="width:11%">Valor</th><th class="num ref" style="width:11%">Rango</th>
+          <th class="sep" style="width:28%">Parámetro</th><th class="num" style="width:11%">Valor</th><th class="num ref" style="width:11%">Rango</th>
         </tr>
         ${body}
       </table>`;
