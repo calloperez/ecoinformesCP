@@ -313,13 +313,22 @@ table.rp-duo td.sep, table.rp-duo th.sep{border-left:1px solid var(--line);paddi
     box-shadow:none !important;max-width:none !important;width:100% !important;
     padding:0 !important;min-height:0 !important;margin:0 auto;
   }
-  /* nunca cortar una sección, fila de tabla, párrafo o bloque a la mitad entre dos hojas */
-  .rp-header, .rp-patient, .rp-summary, .rp-section, table.rp-duo, .rp-findings, .rp-text,
-  .rp-images, .rp-footer, table.rp-table, table.rp-table tr{
+  /* No cortar por dentro estos bloques. Las tablas SÍ pueden partirse, pero solo
+     ENTRE filas (cada <tr> se mantiene entero) — así una tabla larga llena la hoja
+     y nunca se corta una fila a la mitad. */
+  .rp-header, .rp-patient, .rp-summary, .rp-section, .rp-findings, .rp-text,
+  .rp-images, .rp-footer, table.rp-table tr{
     page-break-inside: avoid;
     break-inside: avoid;
   }
+  /* Un título de sección nunca queda huérfano al pie: baja con su contenido. */
   .rp-section{ page-break-after: avoid; break-after: avoid; }
+  /* DESCRIPCIÓN + CONCLUSIONES siempre juntas. */
+  .rp-narrative{ page-break-inside: avoid; break-inside: avoid; }
+  /* Las IMÁGENES arrancan en hoja nueva. */
+  .rp-imgsec{ page-break-before: always; break-before: page; }
+  /* Imágenes sueltas no se parten. */
+  .rp-images img{ page-break-inside: avoid; break-inside: avoid; }
   /* La firma debe verse correctamente */
   .rp-sign img.firma{ -webkit-print-color-adjust:exact; print-color-adjust:exact; }
   /* Forzar que no aparezca URL ni fecha — el usuario debe desactivar "Encabezados y
@@ -343,7 +352,7 @@ table.rp-duo td.sep, table.rp-duo th.sep{border-left:1px solid var(--line);paddi
     <div class="sidebar-foot">
       <button class="btn" id="btnNewPatient">+ Nuevo paciente</button>
       <div id="syncStatus" style="text-align:center;font-size:10px;color:var(--gray-3);margin-top:6px;">●  En línea</div>
-      <div style="text-align:center;font-size:10px;color:var(--gray-3);margin-top:2px;">build 2026-07-09-r69</div>
+      <div style="text-align:center;font-size:10px;color:var(--gray-3);margin-top:2px;">build 2026-07-10-r70</div>
     </div>
   </div>
   <div class="main" id="main"></div>
@@ -1931,6 +1940,13 @@ const PdfService = (()=>{
       if(placed) flush(prevBottom);
       if(!pages.length) pages.push([0, canvas.height]);
 
+      /* DIAG r70 — vuelca átomos y hojas */
+      try{
+        const A=atoms.map((a,k)=>k+':'+Math.round(a.top)+'-'+Math.round(a.bottom)+(a.hard?'H':'')).join('  ');
+        const P=pages.map((p,k)=>k+':'+Math.round(p[0])+'-'+Math.round(p[1])).join('  ');
+        alert('DIAG r70\ncanvasH='+canvas.height+'  pageH='+pageH+'  #kids='+kids.length+'\n\nÁTOMOS ('+atoms.length+'):\n'+A+'\n\nHOJAS ('+pages.length+'):\n'+P);
+      }catch(e){}
+
       /* --- Corte del canvas por hoja --- */
       let first=true;
       for(const [pt,pb] of pages){
@@ -2370,10 +2386,19 @@ const App = (()=>{
       const paper = document.getElementById('paper');
       if(!paper) return;
       const nombre = currentStudy ? (currentStudy.p_nombre||'informe')+'_'+(currentStudy.fecha||'') : 'informe';
-      const shareText = currentStudy && currentStudy.p_nombre
-        ? 'Informe de Ecocardiograma — '+currentStudy.p_nombre
-        : 'Informe de Ecocardiograma Doppler Color';
-      await PdfService.downloadFromElement(paper, nombre, shareText);
+      /* Asegurar que todas las imágenes (logo, firma, ecos) estén cargadas antes de imprimir. */
+      try{
+        const imgs=[...paper.querySelectorAll('img')];
+        await Promise.all(imgs.map(im=> im.complete ? Promise.resolve() : new Promise(r=>{ im.onload=im.onerror=r; })));
+      }catch(e){}
+      /* Paginación NATIVA del navegador (respeta el CSS @media print: no parte filas,
+         no clipea texto, mantiene título con contenido, descripción+conclusiones juntas,
+         imágenes en hoja nueva). El usuario elige "Guardar como PDF" / "Guardar en Archivos".
+         Sugerencia: desactivar "Encabezados y pies de página" para un PDF limpio. */
+      const prevTitle=document.title;
+      document.title=nombre;
+      try{ window.print(); }
+      finally{ setTimeout(()=>{ document.title=prevTitle; }, 800); }
     };
     document.querySelectorAll('.fgroup-head').forEach(h=> h.onclick = ()=> h.parentElement.classList.toggle('open'));
     document.getElementById('btnModeFull').onclick = ()=> setExpress(false);
@@ -2968,11 +2993,13 @@ const App = (()=>{
       ${tablesHtml}
       <div class="rp-section">Hallazgos complementarios</div>
       <div class="rp-findings">${(s.hallazgos||[]).length ? s.hallazgos.join(' · ') : '<span class="rp-empty">Sin hallazgos marcados.</span>'}</div>
-      <div class="rp-section">Descripción</div>
-      <div class="rp-text" id="descText" contenteditable="true">${escapeHtml(desc)}</div>
-      <div class="rp-section">Conclusiones</div>
-      <div class="rp-text" id="conclText" contenteditable="true">${escapeHtml(concl)}</div>
-      ${pendingImages.length ? `<div class="rp-section">Imágenes</div><div class="rp-images">${pendingImages.map(src=>`<img src="${src}" width="132" height="99" style="width:132px;height:99px;object-fit:cover;">`).join('')}</div>` : ''}
+      <div class="rp-narrative">
+        <div class="rp-section">Descripción</div>
+        <div class="rp-text" id="descText" contenteditable="true">${escapeHtml(desc)}</div>
+        <div class="rp-section">Conclusiones</div>
+        <div class="rp-text" id="conclText" contenteditable="true">${escapeHtml(concl)}</div>
+      </div>
+      ${pendingImages.length ? `<div class="rp-imgsec"><div class="rp-section">Imágenes</div><div class="rp-images">${pendingImages.map(src=>`<img src="${src}" width="132" height="99" style="width:132px;height:99px;object-fit:cover;">`).join('')}</div></div>` : ''}
       <div class="rp-footer">
         <div>Informe generado electrónicamente</div>
         <div class="rp-sign">
