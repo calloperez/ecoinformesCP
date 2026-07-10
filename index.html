@@ -343,7 +343,7 @@ table.rp-duo td.sep, table.rp-duo th.sep{border-left:1px solid var(--line);paddi
     <div class="sidebar-foot">
       <button class="btn" id="btnNewPatient">+ Nuevo paciente</button>
       <div id="syncStatus" style="text-align:center;font-size:10px;color:var(--gray-3);margin-top:6px;">●  En línea</div>
-      <div style="text-align:center;font-size:10px;color:var(--gray-3);margin-top:2px;">build 2026-07-09-r67</div>
+      <div style="text-align:center;font-size:10px;color:var(--gray-3);margin-top:2px;">build 2026-07-09-r69</div>
     </div>
   </div>
   <div class="main" id="main"></div>
@@ -1787,61 +1787,80 @@ const PdfService = (()=>{
          ambos caen en el espacio en blanco entre filas, nunca sobre el texto. */
       /* .rp-footer excluido: así el footer fluye con las conclusiones y no se fuerza a página separada */
       const elTop=el.getBoundingClientRect().top;
-      /* Duos ya NO son atómicos: al ser tablas planas, cortar entre sus filas es limpio
-         (ambas columnas cortan en el mismo <tr>). Se incluyen sus filas como puntos de
-         corte con table.rp-table tr, evitando el corte forzado a mitad de tabla. */
-      const bSel='.rp-header,.rp-patient,.rp-summary,.rp-section,table.rp-table tr,.rp-findings,.rp-text,.rp-images';
-      let breaks=[0];
-      el.querySelectorAll(bSel).forEach(b=>{
-        const r=b.getBoundingClientRect();
-        breaks.push(Math.round((r.top-elTop)*scale));
-        breaks.push(Math.round((r.bottom-elTop)*scale));
-      });
-      el.querySelectorAll('.rp-text').forEach(t=>{
-        try{
-          const range=document.createRange(); range.selectNodeContents(t);
-          const rects=range.getClientRects();
-          for(let i=0;i<rects.length;i++) breaks.push(Math.round((rects[i].bottom-elTop)*scale));
-        }catch(e){
-          const lh=parseFloat(getComputedStyle(t).lineHeight)||20;
-          const tTop=t.getBoundingClientRect().top-elTop;
-          for(let y=lh;y<t.offsetHeight;y+=lh) breaks.push(Math.round((tTop+y)*scale));
-        }
-      });
-      breaks.push(canvas.height);
-
-      /* Anti-huérfano (no destructivo): guarda la posición de cada título de sección.
-         En el bucle, si un corte cae justo después de un título (con poco contenido
-         debajo), se mueve el corte a ANTES del título. Al no ELIMINAR cortes, nunca
-         genera huecos grandes (a diferencia del método anterior). */
-      const titleSpans=[];
-      el.querySelectorAll('.rp-section').forEach(s=>{
-        /* CONCLUSIONES, IMÁGENES y DESCRIPCIÓN se excluyen del guarda anti-huérfano:
-           su ubicación la manejan los saltos forzados. El guarda solo cuida las
-           secciones de tablas (Aurícula, Ventrículo, Circulación, etc.). */
-        const txt=(s.textContent||'').normalize('NFC').trim().toLowerCase();
-        if(txt.startsWith('conclusion')||txt.startsWith('imagen')||txt.startsWith('imá')||txt.startsWith('descripci')) return;
-        const r=s.getBoundingClientRect();
-        titleSpans.push([(r.top-elTop)*scale, (r.bottom-elTop)*scale]);
-      });
-
-      /* Saltos de página forzados: DESCRIPCIÓN e IMÁGENES arrancan cada una en hoja
-         nueva. Detección a prueba de acentos/normalización (compara prefijos sin tilde). */
-      let forcedBreak = Infinity;
-      let descTop = Infinity;
+      const toY = px => Math.round((px - elTop) * scale);
       const norm = s => (s||'').normalize('NFC').trim().toLowerCase();
-      el.querySelectorAll('.rp-section').forEach(s=>{
-        const t=norm(s.textContent);
-        const top=(s.getBoundingClientRect().top - elTop) * scale;
-        if(t.startsWith('imagen') || t.startsWith('imá')) forcedBreak = top;
-        if(t.startsWith('descripci')) descTop = top;
-      });
+      const isEl = (n,sel) => n && n.matches && n.matches(sel);
+
+      /* ============================================================
+         PAGINACIÓN POR BLOQUES (robusta).
+         Cada hijo directo del informe es un bloque de flujo. Se agrupan en "átomos"
+         que NUNCA se parten por dentro, salvo que un átomo solo sea más alto que una
+         hoja (ahí se parte por sus filas/renglones internos). Reglas:
+          · un título de sección va pegado a su contenido (no se orfana),
+          · DESCRIPCIÓN + CONCLUSIONES forman UN átomo (quedan siempre juntas),
+          · IMÁGENES arranca en hoja nueva (átomo "hard"),
+          · la firma (footer) queda pegada al último bloque de contenido.
+         Al armar las hojas se meten átomos enteros hasta que no entra uno más.
+         ============================================================ */
+      const rowsOf = node => {
+        const ys=[]; if(!node) return ys;
+        if(isEl(node,'table')){
+          node.querySelectorAll('tr').forEach(tr=>{ ys.push(toY(tr.getBoundingClientRect().bottom)); });
+        } else if(isEl(node,'.rp-images')){
+          const seen={}; node.querySelectorAll('img').forEach(im=>{ const b=toY(im.getBoundingClientRect().bottom); if(!seen[b]){seen[b]=1; ys.push(b);} });
+        } else if(isEl(node,'.rp-text')){
+          try{ const rg=document.createRange(); rg.selectNodeContents(node); const rc=rg.getClientRects();
+               for(let i=0;i<rc.length;i++) ys.push(toY(rc[i].bottom)); }catch(e){}
+        }
+        return ys;
+      };
+      const splittable = node => isEl(node,'table')||isEl(node,'.rp-images')||isEl(node,'.rp-text');
+
+      const kids = Array.from(el.children);
+      const atoms=[];
+      for(let i=0;i<kids.length;i++){
+        const c=kids[i];
+        const rc=c.getBoundingClientRect();
+        const cTop=toY(rc.top), cBot=toY(rc.bottom);
+        if(isEl(c,'.rp-section')){
+          const nm=norm(c.textContent);
+          if(nm.startsWith('descripci')){
+            // Absorbe DESCRIPCIÓN + CONCLUSIONES (hasta IMÁGENES o footer) en un solo átomo.
+            let j=i+1, bottom=cBot; const inner=[];
+            while(j<kids.length){
+              const kj=kids[j];
+              const njm = isEl(kj,'.rp-section') ? norm(kj.textContent) : null;
+              if(njm && (njm.startsWith('imagen')||njm.startsWith('imá'))) break;
+              if(isEl(kj,'.rp-footer')) break;
+              bottom=toY(kj.getBoundingClientRect().bottom);
+              if(isEl(kj,'.rp-text')) inner.push(...rowsOf(kj));
+              j++;
+            }
+            atoms.push({top:cTop, bottom, hard:false, inner});   // desc+concl: bloque indivisible (no fuerza hoja nueva)
+            i=j-1;
+          } else if(nm.startsWith('imagen')||nm.startsWith('imá')){
+            const content=kids[i+1];
+            const bottom=content?toY(content.getBoundingClientRect().bottom):cBot;
+            atoms.push({top:cTop, bottom, hard:true, inner:rowsOf(content)});
+            if(content) i++;
+          } else {
+            const content=kids[i+1];
+            const bottom=content?toY(content.getBoundingClientRect().bottom):cBot;
+            atoms.push({top:cTop, bottom, hard:false, inner:splittable(content)?rowsOf(content):[]});
+            if(content) i++;
+          }
+        } else if(isEl(c,'.rp-footer')){
+          if(atoms.length) atoms[atoms.length-1].bottom = cBot;   // firma pegada al bloque previo
+          else atoms.push({top:cTop, bottom:cBot, hard:false, inner:[]});
+        } else {
+          atoms.push({top:cTop, bottom:cBot, hard:false, inner:splittable(c)?rowsOf(c):[]});
+        }
+      }
 
       el.style.cssText=prevStyle;
       if(sp) sp.scrollTop=prevScroll;
       if(ftBtn) ftBtn.style.visibility='';
       if(ftPanel) ftPanel.style.visibility='';
-      breaks=[...new Set(breaks)].sort((a,b)=>a-b);
 
       const {jsPDF}=window.jspdf;
       const pdf=new jsPDF('p','mm','a4');
@@ -1890,67 +1909,39 @@ const PdfService = (()=>{
         return yr;
       };
 
-      /* Recorte del blanco final: se busca desde abajo la última fila con "tinta"
-         (umbral alto 235 para incluir el footer gris claro). El contenido efectivo
-         (contentH) termina justo después de esa fila, evitando arrastrar una hoja casi
-         en blanco al final. */
-      let contentH = canvas.height;
-      if(canSnap){
-        const cd=canvas.getContext('2d'), thInk=235;
-        for(let y=canvas.height-1; y>=0; y--){
-          let ink=false;
-          try{
-            const d=cd.getImageData(0,y,canvas.width,1).data;
-            for(let i=0;i<d.length;i+=16){ if(d[i]<thInk&&d[i+1]<thInk&&d[i+2]<thInk){ ink=true; break; } }
-          }catch(e){ contentH=canvas.height; break; }
-          if(ink){ contentH=Math.min(canvas.height, y+Math.round(8*pxMM)); break; }
+      /* --- Empaquetado de átomos en hojas --- */
+      const pages=[];
+      let pageTop=0, prevBottom=0, placed=false;
+      const flush=(b)=>{ if(b>pageTop) pages.push([pageTop, b]); };
+      for(let ai=0; ai<atoms.length; ai++){
+        let a=atoms[ai];
+        if(a.hard && placed){ flush(prevBottom); pageTop=a.top; placed=false; }
+        for(let guard=0; guard<20000; guard++){
+          const avail = pageTop + pageH;
+          if(a.bottom <= avail){ prevBottom=a.bottom; placed=true; break; }   // entra entero
+          if(placed){ flush(prevBottom); pageTop=a.top; placed=false; continue; } // hoja nueva y reintenta
+          // hoja vacía y el átomo es más alto que una hoja → partir por su mejor corte interno
+          let cut=pageTop;
+          for(const y of a.inner){ if(y>pageTop+2 && y<=avail && y>cut) cut=y; }
+          if(cut<=pageTop){ const s=snapClean(avail); cut = (s>pageTop? s : avail); } // fallback
+          flush(cut); pageTop=cut; placed=false;
+          a={top:cut, bottom:a.bottom, hard:false, inner:a.inner};
         }
       }
+      if(placed) flush(prevBottom);
+      if(!pages.length) pages.push([0, canvas.height]);
 
-      let cursor=0, first=true, imgBreakDone=false, descBreakDone=false;
-      while(cursor<contentH-1){
-        const target=Math.min(cursor+pageH,contentH);
-        let chosen=null;
-        breaks.forEach(b=>{ if(b>cursor&&b<=target) chosen=b; });
-        if(chosen===null||chosen<=cursor) chosen=target;
-
-        let usedForced=false;
-        /* Salto forzado ANTES de DESCRIPCIÓN: la descripción arranca en hoja nueva, así
-           descripción + conclusiones quedan siempre juntas y completas (ambas entran en
-           una hoja). Determinista: no depende de dónde caiga el corte natural. */
-        if(!descBreakDone && isFinite(descTop) && descTop>cursor+2 && descTop<=chosen){
-          chosen=descTop; usedForced=true; descBreakDone=true;
-        }
-
-        /* Salto forzado ANTES de IMÁGENES: arrancan en hoja nueva. */
-        if(!imgBreakDone && isFinite(forcedBreak) && forcedBreak>cursor+2 && forcedBreak<=chosen && (forcedBreak-cursor)<=pageH){
-          chosen=forcedBreak; usedForced=true; imgBreakDone=true;
-        }
-
-        /* Anti-huérfano (solo secciones de tablas): si el corte quedó justo tras un título,
-           se mueve a ANTES del título. No aplica si ya se forzó el corte. */
-        if(!usedForced){
-          for(const t of titleSpans){
-            const th=t[1]-t[0];
-            if(t[0]>cursor && chosen>t[1] && chosen < t[1] + 1.6*th){ chosen=t[0]; break; }
-          }
-        }
-        /* Snap: si el corte cae sobre una letra, lo lleva al blanco más cercano. */
-        const snapped=snapClean(chosen);
-        if(snapped>cursor) chosen=snapped;
-        /* Anti-viuda del final: absorbe un resto chico (p. ej. la línea del footer) en
-           esta hoja en vez de abrir una hoja nueva casi vacía. */
-        if(!usedForced && chosen<contentH && (contentH-chosen) <= 0.20*pageH){
-          chosen=contentH;
-        }
-        const h=chosen-cursor;
-        if(h<=0){ cursor=Math.max(cursor+1,chosen); continue; } // salvaguarda anti página-cero
+      /* --- Corte del canvas por hoja --- */
+      let first=true;
+      for(const [pt,pb] of pages){
+        const h=pb-pt;
+        if(h<=0) continue;
         const sc=document.createElement('canvas');
         sc.width=canvas.width; sc.height=h;
-        sc.getContext('2d').drawImage(canvas,0,cursor,canvas.width,h,0,0,canvas.width,h);
+        sc.getContext('2d').drawImage(canvas,0,pt,canvas.width,h,0,0,canvas.width,h);
         if(!first) pdf.addPage();
         pdf.addImage(sc.toDataURL('image/jpeg',0.98),'JPEG',mmX,mmY,pW,Math.min(h/pxMM,pH));
-        cursor=chosen; first=false;
+        first=false;
       }
 
       /* Marcador de build TEMPORAL en el pie de cada hoja (esquina inferior izquierda,
@@ -1958,7 +1949,7 @@ const PdfService = (()=>{
       try{
         const _np=pdf.getNumberOfPages();
         pdf.setFontSize(5); pdf.setTextColor(200,200,200);
-        for(let p=1;p<=_np;p++){ pdf.setPage(p); pdf.text('r67',6,pH+mmY-2); }
+        for(let p=1;p<=_np;p++){ pdf.setPage(p); pdf.text('r69',6,pH+mmY-2); }
         pdf.setTextColor(0,0,0);
       }catch(e){}
 
