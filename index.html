@@ -311,8 +311,15 @@ table.rp-duo td.sep, table.rp-duo th.sep{border-left:1px solid var(--line);paddi
   .report-pane{padding:0 !important;background:#fff !important;}
   .paper{
     box-shadow:none !important;max-width:none !important;width:100% !important;
-    padding:0 !important;min-height:0 !important;margin:0 auto;
+    min-height:0 !important;margin:0 auto;
+    /* Margen visual del informe. Con @page margin:0, este padding hace de margen.
+       Laterales aplican a TODAS las hojas; el superior a la 1ª y el inferior a la última.
+       En las hojas intermedias, el aire arriba/abajo lo dan los espacios de cada bloque. */
+    padding:14mm 12mm !important;
   }
+  /* Un poco de aire arriba de cada título de sección: así, cuando una sección arranca
+     al tope de una hoja intermedia, no queda pegada al borde superior. */
+  .rp-section{ padding-top:4mm; }
   /* No cortar por dentro estos bloques. Las tablas SÍ pueden partirse, pero solo
      ENTRE filas (cada <tr> se mantiene entero) — así una tabla larga llena la hoja
      y nunca se corta una fila a la mitad. */
@@ -331,11 +338,11 @@ table.rp-duo td.sep, table.rp-duo th.sep{border-left:1px solid var(--line);paddi
   .rp-images img{ page-break-inside: avoid; break-inside: avoid; }
   /* La firma debe verse correctamente */
   .rp-sign img.firma{ -webkit-print-color-adjust:exact; print-color-adjust:exact; }
-  /* Forzar que no aparezca URL ni fecha — el usuario debe desactivar "Encabezados y
-     pies de página" en el diálogo de impresión para un PDF completamente limpio */
+  /* Margen de página en 0: el navegador ya no tiene espacio para inyectar la URL, la
+     fecha ni el número de página. El margen visual lo da el padding de .paper (arriba). */
   @page{
     size: A4 portrait;
-    margin: 15mm;
+    margin: 0;
   }
 }
 </style>
@@ -352,7 +359,7 @@ table.rp-duo td.sep, table.rp-duo th.sep{border-left:1px solid var(--line);paddi
     <div class="sidebar-foot">
       <button class="btn" id="btnNewPatient">+ Nuevo paciente</button>
       <div id="syncStatus" style="text-align:center;font-size:10px;color:var(--gray-3);margin-top:6px;">●  En línea</div>
-      <div style="text-align:center;font-size:10px;color:var(--gray-3);margin-top:2px;">build 2026-07-10-r71</div>
+      <div style="text-align:center;font-size:10px;color:var(--gray-3);margin-top:2px;">build 2026-07-10-r72</div>
     </div>
   </div>
   <div class="main" id="main"></div>
