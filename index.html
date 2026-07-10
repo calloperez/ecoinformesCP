@@ -265,9 +265,6 @@ table.rp-duo{table-layout:fixed;}
 table.rp-duo .rp-duo-title th{font-size:10px;letter-spacing:.05em;text-transform:uppercase;font-weight:700;
   color:var(--ink);border-bottom:1px solid var(--ink);padding:2px 5px;text-align:left;}
 table.rp-duo td.sep, table.rp-duo th.sep{border-left:1px solid var(--line);padding-left:8px;}
-/* Con table-layout:fixed, recorta cualquier derrame horizontal para que un encabezado
-   o etiqueta no se monte sobre la columna vecina (causa del "PARÁMETROVALOR" pisado). */
-table.rp-duo th, table.rp-duo td{overflow:hidden;}
 
 .rp-text{font-size:10.5px;line-height:1.4;white-space:pre-wrap;width:100%;font-family:'Georgia',serif;
   color:var(--ink);min-height:1.6em;}
@@ -346,7 +343,7 @@ table.rp-duo th, table.rp-duo td{overflow:hidden;}
     <div class="sidebar-foot">
       <button class="btn" id="btnNewPatient">+ Nuevo paciente</button>
       <div id="syncStatus" style="text-align:center;font-size:10px;color:var(--gray-3);margin-top:6px;">●  En línea</div>
-      <div style="text-align:center;font-size:10px;color:var(--gray-3);margin-top:2px;">build 2026-07-09-r66</div>
+      <div style="text-align:center;font-size:10px;color:var(--gray-3);margin-top:2px;">build 2026-07-09-r67</div>
     </div>
   </div>
   <div class="main" id="main"></div>
@@ -1819,26 +1816,25 @@ const PdfService = (()=>{
          genera huecos grandes (a diferencia del método anterior). */
       const titleSpans=[];
       el.querySelectorAll('.rp-section').forEach(s=>{
-        /* CONCLUSIONES e IMÁGENES se excluyen del guarda anti-huérfano: su corte lo
-           maneja el break forzado antes de IMÁGENES. Si se dejaran, el guarda vería
-           poco texto bajo el título de Conclusiones y la empujaría de más, separándola
-           de la Descripción y dejando el hueco grande. El guarda solo debe cuidar las
-           secciones de tablas (Aurícula, Ventrículo, etc.). */
-        const txt=(s.textContent||'').trim().toLowerCase();
-        if(txt==='conclusiones'||txt==='imágenes'||txt==='imagenes') return;
+        /* CONCLUSIONES, IMÁGENES y DESCRIPCIÓN se excluyen del guarda anti-huérfano:
+           su ubicación la manejan los saltos forzados. El guarda solo cuida las
+           secciones de tablas (Aurícula, Ventrículo, Circulación, etc.). */
+        const txt=(s.textContent||'').normalize('NFC').trim().toLowerCase();
+        if(txt.startsWith('conclusion')||txt.startsWith('imagen')||txt.startsWith('imá')||txt.startsWith('descripci')) return;
         const r=s.getBoundingClientRect();
         titleSpans.push([(r.top-elTop)*scale, (r.bottom-elTop)*scale]);
       });
 
-      /* Corte forzado antes de la sección IMÁGENES: las imágenes arrancan siempre en
-         hoja nueva (el Dr. las monta aparte y decide cuántas). */
+      /* Saltos de página forzados: DESCRIPCIÓN e IMÁGENES arrancan cada una en hoja
+         nueva. Detección a prueba de acentos/normalización (compara prefijos sin tilde). */
       let forcedBreak = Infinity;
       let descTop = Infinity;
+      const norm = s => (s||'').normalize('NFC').trim().toLowerCase();
       el.querySelectorAll('.rp-section').forEach(s=>{
-        const t=(s.textContent||'').trim().toLowerCase();
+        const t=norm(s.textContent);
         const top=(s.getBoundingClientRect().top - elTop) * scale;
-        if(t === 'imágenes' || t === 'imagenes') forcedBreak = top;
-        if(t === 'descripción' || t === 'descripcion') descTop = top;
+        if(t.startsWith('imagen') || t.startsWith('imá')) forcedBreak = top;
+        if(t.startsWith('descripci')) descTop = top;
       });
 
       el.style.cssText=prevStyle;
@@ -1911,7 +1907,7 @@ const PdfService = (()=>{
         }
       }
 
-      let cursor=0, first=true, imgBreakDone=false;
+      let cursor=0, first=true, imgBreakDone=false, descBreakDone=false;
       while(cursor<contentH-1){
         const target=Math.min(cursor+pageH,contentH);
         let chosen=null;
@@ -1919,21 +1915,20 @@ const PdfService = (()=>{
         if(chosen===null||chosen<=cursor) chosen=target;
 
         let usedForced=false;
-        /* Mantener DESCRIPCIÓN + CONCLUSIONES juntas: si el corte caería DENTRO de ese
-           bloque, se mueve a ANTES de la descripción para que bajen juntas. */
-        const keepEnd = isFinite(forcedBreak) ? forcedBreak : contentH;
-        if(isFinite(descTop) && descTop>cursor && chosen>descTop && chosen<keepEnd && (keepEnd-descTop)<=pageH){
-          chosen=descTop; usedForced=true;
+        /* Salto forzado ANTES de DESCRIPCIÓN: la descripción arranca en hoja nueva, así
+           descripción + conclusiones quedan siempre juntas y completas (ambas entran en
+           una hoja). Determinista: no depende de dónde caiga el corte natural. */
+        if(!descBreakDone && isFinite(descTop) && descTop>cursor+2 && descTop<=chosen){
+          chosen=descTop; usedForced=true; descBreakDone=true;
         }
 
-        /* Corte forzado antes de IMÁGENES: arrancan en hoja nueva. imgBreakDone evita el
-           re-disparo en la misma posición (que generaba una página de altura casi cero). */
-        if(!imgBreakDone && isFinite(forcedBreak) && forcedBreak>cursor && forcedBreak<=chosen && (forcedBreak-cursor)<=pageH){
+        /* Salto forzado ANTES de IMÁGENES: arrancan en hoja nueva. */
+        if(!imgBreakDone && isFinite(forcedBreak) && forcedBreak>cursor+2 && forcedBreak<=chosen && (forcedBreak-cursor)<=pageH){
           chosen=forcedBreak; usedForced=true; imgBreakDone=true;
         }
 
-        /* Anti-huérfano: si el corte quedó justo tras un título de sección, se mueve a
-           ANTES del título. No aplica si ya se forzó el corte. */
+        /* Anti-huérfano (solo secciones de tablas): si el corte quedó justo tras un título,
+           se mueve a ANTES del título. No aplica si ya se forzó el corte. */
         if(!usedForced){
           for(const t of titleSpans){
             const th=t[1]-t[0];
@@ -1957,6 +1952,15 @@ const PdfService = (()=>{
         pdf.addImage(sc.toDataURL('image/jpeg',0.98),'JPEG',mmX,mmY,pW,Math.min(h/pxMM,pH));
         cursor=chosen; first=false;
       }
+
+      /* Marcador de build TEMPORAL en el pie de cada hoja (esquina inferior izquierda,
+         gris muy tenue) para confirmar qué versión generó un PDF. Quitar cuando cierre. */
+      try{
+        const _np=pdf.getNumberOfPages();
+        pdf.setFontSize(5); pdf.setTextColor(200,200,200);
+        for(let p=1;p<=_np;p++){ pdf.setPage(p); pdf.text('r67',6,pH+mmY-2); }
+        pdf.setTextColor(0,0,0);
+      }catch(e){}
 
       const fileName=(name||'informe').replace(/[^a-z0-9_\-]/gi,'_')+'.pdf';
       const shareTitle=shareText||'Informe de Ecocardiograma Doppler Color';
