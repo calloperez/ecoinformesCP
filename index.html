@@ -343,7 +343,7 @@ table.rp-duo td.sep, table.rp-duo th.sep{border-left:1px solid var(--line);paddi
     <div class="sidebar-foot">
       <button class="btn" id="btnNewPatient">+ Nuevo paciente</button>
       <div id="syncStatus" style="text-align:center;font-size:10px;color:var(--gray-3);margin-top:6px;">●  En línea</div>
-      <div style="text-align:center;font-size:10px;color:var(--gray-3);margin-top:2px;">build 2026-07-09-r62</div>
+      <div style="text-align:center;font-size:10px;color:var(--gray-3);margin-top:2px;">build 2026-07-09-r63</div>
     </div>
   </div>
   <div class="main" id="main"></div>
@@ -1891,9 +1891,26 @@ const PdfService = (()=>{
         return yr;
       };
 
+      /* Recorte del blanco final: se busca desde abajo la última fila con "tinta"
+         (umbral alto 235 para incluir el footer gris claro). El contenido efectivo
+         (contentH) termina justo después de esa fila, evitando arrastrar una hoja casi
+         en blanco al final. */
+      let contentH = canvas.height;
+      if(canSnap){
+        const cd=canvas.getContext('2d'), thInk=235;
+        for(let y=canvas.height-1; y>=0; y--){
+          let ink=false;
+          try{
+            const d=cd.getImageData(0,y,canvas.width,1).data;
+            for(let i=0;i<d.length;i+=16){ if(d[i]<thInk&&d[i+1]<thInk&&d[i+2]<thInk){ ink=true; break; } }
+          }catch(e){ contentH=canvas.height; break; }
+          if(ink){ contentH=Math.min(canvas.height, y+Math.round(8*pxMM)); break; }
+        }
+      }
+
       let cursor=0, first=true, imgBreakDone=false;
-      while(cursor<canvas.height-1){
-        const target=Math.min(cursor+pageH,canvas.height);
+      while(cursor<contentH-1){
+        const target=Math.min(cursor+pageH,contentH);
         let chosen=null;
         breaks.forEach(b=>{ if(b>cursor&&b<=target) chosen=b; });
         if(chosen===null||chosen<=cursor) chosen=target;
@@ -1906,7 +1923,7 @@ const PdfService = (()=>{
            para que descripción y conclusiones bajen juntas a la hoja siguiente. Solo si el
            bloque entra en una hoja; si fuera más alto que una página, se deja que la
            paginación normal lo divida. */
-        const keepEnd = isFinite(forcedBreak) ? forcedBreak : canvas.height;
+        const keepEnd = isFinite(forcedBreak) ? forcedBreak : contentH;
         if(isFinite(descTop) && descTop>cursor && chosen>descTop && chosen<keepEnd && (keepEnd-descTop)<=pageH){
           chosen=descTop; usedForced=true;
         }
@@ -1931,6 +1948,13 @@ const PdfService = (()=>{
            blanco más cercano. Si no puede avanzar, mantiene el corte original. */
         const snapped=snapClean(chosen);
         if(snapped>cursor) chosen=snapped;
+        /* Anti-viuda del final: si lo que queda hasta el final (contentH) es un resto
+           chico (p. ej. la línea del footer), se absorbe en ESTA hoja en vez de abrir una
+           hoja nueva casi vacía. El pequeño excedente sobre el alto útil lo comprime
+           jsPDF de forma imperceptible. No aplica si el corte se forzó a IMÁGENES. */
+        if(!usedForced && chosen<contentH && (contentH-chosen) <= 0.20*pageH){
+          chosen=contentH;
+        }
         const h=chosen-cursor;
         if(h<=0){ cursor=Math.max(cursor+1,chosen); continue; } // salvaguarda anti página-cero
         const sc=document.createElement('canvas');
