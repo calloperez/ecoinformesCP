@@ -8,7 +8,7 @@
      conexión (no se queda pegado en caché). Si no hay red, usa la copia cacheada.
    - Assets y librerías CDN -> cache-first: carga instantánea y funciona offline.
    ---------------------------------------------------------------------------- */
-const VERSION = 'v65';
+const VERSION = 'v66';
 const CACHE = 'ecoinforme-' + VERSION;
 
 const ASSETS = [
