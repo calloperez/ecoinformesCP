@@ -277,8 +277,8 @@ table.rp-duo td.sep, table.rp-duo th.sep{border-left:1px solid var(--line);paddi
    el width, dejando las imágenes gigantes (2 por fila). inline-block con tamaño fijo
    sí lo respeta y las empaqueta (~6 por fila). font-size:0 elimina el espacio entre
    inline-blocks. */
-.rp-images{margin-top:6px;font-size:0;line-height:0;}
-.rp-images img{display:inline-block;width:132px;height:99px;object-fit:cover;border:1px solid var(--line);margin:0 6px 6px 0;vertical-align:top;}
+.rp-images{margin-top:8px;display:grid;grid-template-columns:repeat(2,1fr);gap:8px;}
+.rp-images img{width:100%;height:auto;aspect-ratio:4/3;object-fit:cover;border:1px solid var(--line);display:block;-webkit-print-color-adjust:exact;print-color-adjust:exact;}
 
 .rp-footer{margin-top:28px;padding-top:10px;border-top:1px solid var(--line);display:flex;justify-content:space-between;
   align-items:flex-end;font-size:9.5px;color:var(--gray-2);font-family:-apple-system,sans-serif;}
@@ -324,7 +324,7 @@ table.rp-duo td.sep, table.rp-duo th.sep{border-left:1px solid var(--line);paddi
      ENTRE filas (cada <tr> se mantiene entero) — así una tabla larga llena la hoja
      y nunca se corta una fila a la mitad. */
   .rp-header, .rp-patient, .rp-summary, .rp-section, .rp-findings, .rp-text,
-  .rp-images, .rp-footer, table.rp-table tr{
+  .rp-footer, table.rp-table tr{
     page-break-inside: avoid;
     break-inside: avoid;
   }
@@ -359,7 +359,7 @@ table.rp-duo td.sep, table.rp-duo th.sep{border-left:1px solid var(--line);paddi
     <div class="sidebar-foot">
       <button class="btn" id="btnNewPatient">+ Nuevo paciente</button>
       <div id="syncStatus" style="text-align:center;font-size:10px;color:var(--gray-3);margin-top:6px;">●  En línea</div>
-      <div style="text-align:center;font-size:10px;color:var(--gray-3);margin-top:2px;">build 2026-07-10-r72</div>
+      <div style="text-align:center;font-size:10px;color:var(--gray-3);margin-top:2px;">build 2026-07-10-r73</div>
     </div>
   </div>
   <div class="main" id="main"></div>
@@ -3006,7 +3006,7 @@ const App = (()=>{
         <div class="rp-section">Conclusiones</div>
         <div class="rp-text" id="conclText" contenteditable="true">${escapeHtml(concl)}</div>
       </div>
-      ${pendingImages.length ? `<div class="rp-imgsec"><div class="rp-section">Imágenes</div><div class="rp-images">${pendingImages.map(src=>`<img src="${src}" width="132" height="99" style="width:132px;height:99px;object-fit:cover;">`).join('')}</div></div>` : ''}
+      ${pendingImages.length ? `<div class="rp-imgsec"><div class="rp-section">Imágenes</div><div class="rp-images">${pendingImages.map(src=>`<img src="${src}" alt="Imagen del estudio">`).join('')}</div></div>` : ''}
       <div class="rp-footer">
         <div>Informe generado electrónicamente</div>
         <div class="rp-sign">
