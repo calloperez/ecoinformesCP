@@ -359,7 +359,7 @@ table.rp-duo td.sep, table.rp-duo th.sep{border-left:1px solid var(--line);paddi
     <div class="sidebar-foot">
       <button class="btn" id="btnNewPatient">+ Nuevo paciente</button>
       <div id="syncStatus" style="text-align:center;font-size:10px;color:var(--gray-3);margin-top:6px;">●  En línea</div>
-      <div style="text-align:center;font-size:10px;color:var(--gray-3);margin-top:2px;">build 2026-07-29-r74</div>
+      <div style="text-align:center;font-size:10px;color:var(--gray-3);margin-top:2px;">build 2026-07-29-r75</div>
     </div>
   </div>
   <div class="main" id="main"></div>
@@ -384,6 +384,20 @@ table.rp-duo td.sep, table.rp-duo th.sep{border-left:1px solid var(--line);paddi
 /* ---------------- Supabase config ---------------- */
 const SUPABASE_URL = 'https://bnjoonrrwgbmegsbbwwi.supabase.co';
 const SUPABASE_KEY = 'sb_publishable__v3RdhJpN8Fx9nyROZ6uaA_IPEsyf-S';
+
+/* Genera un id v4 del lado del cliente, ANTES de cualquier intento de red. Se usa
+   para que crear un paciente/estudio sea idempotente: si la confirmación de un
+   insert exitoso se pierde (timeout) y se reintenta —automático o porque el médico
+   volvió a tocar "Guardar" al ver que "no se guardó"— el reintento hace upsert
+   sobre el MISMO id en vez de crear una fila duplicada. Requiere que la columna
+   'id' de las tablas sea uuid (el default estándar en proyectos nuevos de Supabase). */
+function genId(){
+  if(window.crypto && crypto.randomUUID) return crypto.randomUUID();
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c){
+    const r = Math.random()*16|0, v = c==='x'?r:(r&0x3|0x8);
+    return v.toString(16);
+  });
+}
 
 /* ---------------- SupabaseClient ---------------- */
 const SupabaseClient = (()=>{
@@ -421,9 +435,17 @@ const SupabaseClient = (()=>{
     return res.json();
   }
   async function insert(table, payload){
-    const res = await fetchWithRetry(`${base}/${table}`, {
-      method:'POST', headers: { ...headers, 'Prefer':'return=representation' },
-      body: JSON.stringify(payload)
+    /* Upsert idempotente por 'id': si el llamador no trae id, se genera uno acá
+       (una sola vez, antes del loop de reintentos de fetchWithRetry) y se reusa
+       en todos los reintentos de ESTA llamada. Si el llamador ya trae un id propio
+       (p.ej. generado en el momento de crear el estudio en memoria, para que
+       también sobreviva a que el médico re-toque "Guardar" manualmente), se
+       respeta ese id. on_conflict=id + resolution=merge-duplicates hace que
+       reintentar el mismo insert actualice la fila existente en vez de duplicarla. */
+    const body = payload.id ? payload : { ...payload, id: genId() };
+    const res = await fetchWithRetry(`${base}/${table}?on_conflict=id`, {
+      method:'POST', headers: { ...headers, 'Prefer':'return=representation,resolution=merge-duplicates' },
+      body: JSON.stringify(body)
     });
     if(!res.ok) throw new Error('Supabase insert '+table+' falló: '+res.status+' '+await res.text());
     const rows = await res.json();
@@ -477,8 +499,8 @@ const PatientService = (()=>{
   }
   async function create(data){
     const row = await SupabaseClient.insert('patients',
-      { nombre:data.nombre||'', documento:data.documento||'', edad:data.edad||'', sexo:data.sexo||'' });
-    const cached = DB._get(C)||[]; cached.push(row); DB._set(C, cached);
+      { id:data.id, nombre:data.nombre||'', documento:data.documento||'', edad:data.edad||'', sexo:data.sexo||'' });
+    const cached = (DB._get(C)||[]).filter(p=>p.id!==row.id); cached.push(row); DB._set(C, cached);
     return row;
   }
   async function update(id, data){
@@ -503,7 +525,7 @@ const PatientService = (()=>{
 /* ---------------- StudyService ---------------- */
 const StudyService = (()=>{
   const C = 'eco_sts_v3';
-  function toRow(pid,d){ return { patient_id:pid, fecha:d.fecha||null, data:d }; }
+  function toRow(pid,d){ return { id:d.id, patient_id:pid, fecha:d.fecha||null, data:d }; }
   function fromRow(r){ return { id:r.id, patientId:r.patient_id, savedAt:r.saved_at, fecha:r.fecha, ...(r.data||{}) }; }
 
   /* Guarda el estudio completo en la caché local. Si no entra (cuota de
@@ -2163,7 +2185,10 @@ const App = (()=>{
     const documento = prompt('Documento (opcional):') || '';
     const edad = prompt('Edad (opcional):') || '';
     const sexo = normalizeSexoInput(prompt('Sexo (M/F, opcional):') || '');
-    await intentarCrearPaciente({ nombre, documento, edad, sexo });
+    /* El id se genera UNA vez acá, antes de cualquier intento de red, y se reusa
+       en todos los reintentos (incluido si el médico vuelve a tocar "reintentar"
+       manualmente) — así nunca se crea un paciente duplicado. */
+    await intentarCrearPaciente({ id: genId(), nombre, documento, edad, sexo });
   }
 
   async function intentarCrearPaciente(data){
@@ -2270,7 +2295,12 @@ const App = (()=>{
   async function openStudyEditor(patientId, studyId){
     showFloatBtn(true);
     const patient = await PatientService.get(patientId);
+    /* El id del estudio nuevo se genera ACÁ, al abrir el editor, no al guardar. Así,
+       si "Guardar" falla (o solo parece fallar por una respuesta perdida) y el médico
+       lo intenta de nuevo —una o varias veces, incluso en visitas separadas al mismo
+       borrador antes de salir— siempre apunta al mismo id: upsert, nunca duplicado. */
     currentStudy = studyId ? await StudyService.get(studyId) : {
+      id: genId(),
       patientIdRef: patientId, p_nombre: patient.nombre, p_sexo: patient.sexo||'', p_edad: patient.edad||'',
       p_doc: patient.documento||'', fecha: new Date().toISOString().slice(0,10), hallazgos: []
     };
@@ -2403,10 +2433,16 @@ const App = (()=>{
       const paper = document.getElementById('paper');
       if(!paper) return;
       const nombre = currentStudy ? (currentStudy.p_nombre||'informe')+'_'+(currentStudy.fecha||'') : 'informe';
-      /* Asegurar que todas las imágenes (logo, firma, ecos) estén cargadas antes de imprimir. */
+      /* Asegurar que todas las imágenes (logo, firma, ecos) estén cargadas antes de
+         imprimir. Tope de 3s por imagen: si una nunca dispara load/error (bloqueada,
+         corrupta), no bloquea el botón para siempre — se sigue adelante igual. */
       try{
         const imgs=[...paper.querySelectorAll('img')];
-        await Promise.all(imgs.map(im=> im.complete ? Promise.resolve() : new Promise(r=>{ im.onload=im.onerror=r; })));
+        await Promise.all(imgs.map(im=> im.complete ? Promise.resolve() : new Promise(r=>{
+          im.addEventListener('load', r, {once:true});
+          im.addEventListener('error', r, {once:true});
+          setTimeout(r, 3000);
+        })));
       }catch(e){}
       /* Paginación NATIVA del navegador (respeta el CSS @media print: no parte filas,
          no clipea texto, mantiene título con contenido, descripción+conclusiones juntas,
@@ -3056,17 +3092,15 @@ const App = (()=>{
     currentStudy.images = pendingImages;
     currentStudy.descManual = descOverride;
     currentStudy.conclManual = conclOverride;
-    /* Usar currentStudy.id como fuente de verdad — así el segundo guardado de un
-       estudio recién creado hace UPDATE en vez de crear un duplicado. */
-    const effectiveId = currentStudy.id || studyId;
+    /* currentStudy.id ya existe siempre (se genera al abrir el editor, sea estudio
+       nuevo o existente — ver openStudyEditor). StudyService.create() ahora hace
+       upsert por ese id: inserta si es la primera vez, actualiza si ya existía.
+       Por eso ya no hace falta bifurcar entre create/update acá — guardar dos, tres
+       o diez veces el MISMO estudio (incluso tras un "falló, reintentar" manual)
+       siempre pisa la misma fila, nunca crea una duplicada. */
     try{
-      let saved;
-      if(effectiveId){
-        saved = await StudyService.update(effectiveId, currentStudy);
-      } else {
-        saved = await StudyService.create(patientId, currentStudy);
-        if(saved) currentStudy.id = saved.id; // guardar el id asignado
-      }
+      const saved = await StudyService.create(patientId, currentStudy);
+      if(saved) currentStudy.id = saved.id;
       openPatient(patientId);
     }catch(e){ console.error(e); alert('No se pudo guardar el estudio.\n\n'+e.message); }
   }
