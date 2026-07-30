@@ -361,7 +361,7 @@ table.rp-duo td.sep, table.rp-duo th.sep{border-left:1px solid var(--line);paddi
     <div class="sidebar-foot">
       <button class="btn" id="btnNewPatient">+ Nuevo paciente</button>
       <div id="syncStatus" style="text-align:center;font-size:10px;color:var(--gray-3);margin-top:6px;">●  En línea</div>
-      <div style="text-align:center;font-size:10px;color:var(--gray-3);margin-top:2px;">build 2026-07-29-r77</div>
+      <div style="text-align:center;font-size:10px;color:var(--gray-3);margin-top:2px;">build 2026-07-30-r78</div>
     </div>
   </div>
   <div class="main" id="main"></div>
@@ -516,10 +516,16 @@ const SyncEngine = (()=>{
   }
 
   /* Procesa la cola en orden. Si un envío falla (Supabase pausado/inaccesible,
-     sin red), se corta ahí — la cola queda intacta y se reintenta en el próximo
-     ciclo, sin perder el orden ni los datos. */
+     sin red, o un registro puntual con problema), NO se corta el resto de la
+     cola: se anota el fallo, se sigue con los ítems siguientes, y se reintenta
+     solo lo que quedó pendiente en el próximo ciclo. Antes, un solo ítem
+     trabado (p.ej. por RLS, dato inválido, o límite de tamaño) dejaba
+     congelada TODA la cola detrás de él, y encima bloqueaba el pull (ver
+     runSync) — eso hacía que un dispositivo con un ítem envenenado dejara de
+     ver cambios de otros dispositivos para siempre. */
   async function flushQueue(){
     const ops = await LocalDB.pending_ops.orderBy('ts').toArray();
+    let allOk = true;
     for(const op of ops){
       try{
         if(op.kind==='upsert') await SupabaseClient.insert(op.table, toSupabaseRow(op.table, op.payload));
@@ -527,10 +533,11 @@ const SyncEngine = (()=>{
         await LocalDB.pending_ops.delete(op.id);
       }catch(e){
         console.warn('Sync: no se pudo sincronizar (se reintentará)', op.table, op.recordId, e.message);
-        return false;
+        allOk = false;
+        // seguimos con el resto de la cola en vez de cortar acá
       }
     }
-    return true;
+    return allOk;
   }
 
   /* Trae de Supabase lo modificado después del último pull y lo mergea local
@@ -586,8 +593,16 @@ const SyncEngine = (()=>{
     syncing = true;
     setStatus('syncing');
     try{
-      const pushedAll = await flushQueue();
-      if(pushedAll) await pullRemote();
+      /* Antes: pullRemote() solo corría si flushQueue() devolvía true, o sea si
+         TODO lo pendiente se había subido con éxito. Un solo ítem que fallara
+         de forma persistente (dato con problema, RLS, etc.) dejaba a ESE
+         dispositivo sin traer nunca más los cambios de otros dispositivos,
+         aunque el indicador mostrara "En línea". Ahora el pull corre siempre
+         que haya conexión, independiente de si el push tuvo algún fallo
+         parcial — lo que falló en el push queda en pending_ops y se reintenta
+         solo en el próximo ciclo, sin bloquear la llegada de cambios remotos. */
+      await flushQueue();
+      await pullRemote();
     } finally {
       syncing = false;
       setStatus(navigator.onLine ? 'online' : 'offline');
