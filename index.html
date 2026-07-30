@@ -361,7 +361,7 @@ table.rp-duo td.sep, table.rp-duo th.sep{border-left:1px solid var(--line);paddi
     <div class="sidebar-foot">
       <button class="btn" id="btnNewPatient">+ Nuevo paciente</button>
       <div id="syncStatus" style="text-align:center;font-size:10px;color:var(--gray-3);margin-top:6px;">●  En línea</div>
-      <div style="text-align:center;font-size:10px;color:var(--gray-3);margin-top:2px;">build 2026-07-29-r76</div>
+      <div style="text-align:center;font-size:10px;color:var(--gray-3);margin-top:2px;">build 2026-07-29-r77</div>
     </div>
   </div>
   <div class="main" id="main"></div>
@@ -534,16 +534,28 @@ const SyncEngine = (()=>{
   }
 
   /* Trae de Supabase lo modificado después del último pull y lo mergea local
-     usando last-write-wins por 'updated_at'. Nunca pisa un cambio local más nuevo. */
+     usando last-write-wins por 'updated_at'. Nunca pisa un cambio local más nuevo.
+     IMPORTANTE: incluye también las filas con updated_at NULL (pacientes/estudios
+     creados ANTES de que existiera este campo — un simple filtro '> since' las
+     excluye para siempre, porque en SQL "NULL > lo que sea" nunca es verdadero).
+     A esas filas, al traerlas, se les asigna una fecha local fresca y se las
+     vuelve a subir — así se autocuran en el próximo flush sin necesitar ningún
+     backfill manual en Supabase. */
   async function pullRemote(){
     try{
       const sincePt = (await LocalDB.meta.get('lastPullPatients'))?.value || '1970-01-01T00:00:00Z';
-      const remotePatients = await SupabaseClient.select('patients', `select=*&updated_at=gt.${encodeURIComponent(sincePt)}&order=updated_at.asc`);
+      const remotePatients = await SupabaseClient.select('patients',
+        `select=*&or=(updated_at.gt.${encodeURIComponent(sincePt)},updated_at.is.null)&order=updated_at.asc.nullsfirst`);
       let newestPt = sincePt;
       for(const rp of remotePatients){
         const local = await LocalDB.patients.get(rp.id);
-        if(!local || !local.updated_at || new Date(rp.updated_at) > new Date(local.updated_at)) await LocalDB.patients.put(rp);
-        if(rp.updated_at && rp.updated_at > newestPt) newestPt = rp.updated_at;
+        if(!local || !local.updated_at || (rp.updated_at && new Date(rp.updated_at) > new Date(local.updated_at))) await LocalDB.patients.put(rp);
+        if(!rp.updated_at){
+          /* autocura: fila vieja sin updated_at — se estampa y se reencola */
+          const healed = { ...rp, updated_at: new Date().toISOString() };
+          await LocalDB.patients.put(healed);
+          await SyncEngine.enqueue('patients', healed.id, healed);
+        } else if(rp.updated_at > newestPt) newestPt = rp.updated_at;
       }
       if(remotePatients.length) await LocalDB.meta.put({key:'lastPullPatients', value:newestPt});
     }catch(e){ console.warn('pullRemote patients falló (se reintenta luego)', e.message); }
@@ -551,13 +563,18 @@ const SyncEngine = (()=>{
     try{
       const sinceSt = (await LocalDB.meta.get('lastPullStudies'))?.value || '1970-01-01T00:00:00Z';
       const remoteStudies = await SupabaseClient.select('studies',
-        `select=id,patient_id,fecha,data&data->>updated_at=gt.${encodeURIComponent(sinceSt)}&order=data->>updated_at.asc`);
+        `select=id,patient_id,fecha,data&or=(data->>updated_at.gt.${encodeURIComponent(sinceSt)},data->>updated_at.is.null)&order=data->>updated_at.asc.nullsfirst`);
       let newestSt = sinceSt;
       for(const rs of remoteStudies){
         const flat = { ...(rs.data||{}), id: rs.id, patientId: rs.patient_id, fecha: rs.fecha };
         const local = await LocalDB.studies.get(flat.id);
-        if(!local || !local.updated_at || new Date(flat.updated_at||0) > new Date(local.updated_at||0)) await LocalDB.studies.put(flat);
-        if(flat.updated_at && flat.updated_at > newestSt) newestSt = flat.updated_at;
+        if(!local || !local.updated_at || (flat.updated_at && new Date(flat.updated_at) > new Date(local.updated_at))) await LocalDB.studies.put(flat);
+        if(!flat.updated_at){
+          /* autocura: estudio viejo sin updated_at — se estampa y se reencola */
+          const healed = { ...flat, updated_at: new Date().toISOString() };
+          await LocalDB.studies.put(healed);
+          await SyncEngine.enqueue('studies', healed.id, healed);
+        } else if(flat.updated_at > newestSt) newestSt = flat.updated_at;
       }
       if(remoteStudies.length) await LocalDB.meta.put({key:'lastPullStudies', value:newestSt});
     }catch(e){ console.warn('pullRemote studies falló (se reintenta luego)', e.message); }
