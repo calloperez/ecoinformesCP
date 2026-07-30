@@ -2,15 +2,13 @@
    ----------------------------------------------------------------------------
    IMPORTANTE: bumpeá VERSION en CADA release, junto con el build string de
    index.html. Cambiar VERSION invalida la caché vieja y fuerza la actualización.
-
    Estrategia:
    - Navegación / HTML  -> network-first: la versión nueva se toma apenas hay
      conexión (no se queda pegado en caché). Si no hay red, usa la copia cacheada.
    - Assets y librerías CDN -> cache-first: carga instantánea y funciona offline.
    ---------------------------------------------------------------------------- */
-const VERSION = 'v73';
+const VERSION = 'v76';
 const CACHE = 'ecoinforme-' + VERSION;
-
 const ASSETS = [
   './',
   './index.html',
@@ -21,9 +19,9 @@ const ASSETS = [
   './icon-512.png',
   './icon-512-maskable.png',
   'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js',
-  'https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js'
+  'https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js',
+  'https://cdnjs.cloudflare.com/ajax/libs/dexie/3.2.4/dexie.js'
 ];
-
 self.addEventListener('install', (e) => {
   e.waitUntil(
     caches.open(CACHE)
@@ -31,7 +29,6 @@ self.addEventListener('install', (e) => {
       .then(() => self.skipWaiting())
   );
 });
-
 self.addEventListener('activate', (e) => {
   e.waitUntil(
     caches.keys()
@@ -39,14 +36,11 @@ self.addEventListener('activate', (e) => {
       .then(() => self.clients.claim())
   );
 });
-
 self.addEventListener('fetch', (e) => {
   const req = e.request;
   if (req.method !== 'GET') return;
-
   const accept = req.headers.get('accept') || '';
   const isHTML = req.mode === 'navigate' || accept.includes('text/html');
-
   if (isHTML) {
     // network-first: siempre intenta la versión más nueva
     e.respondWith(
@@ -60,7 +54,6 @@ self.addEventListener('fetch', (e) => {
     );
     return;
   }
-
   // cache-first para el resto (íconos, logo, librerías CDN)
   e.respondWith(
     caches.match(req).then((cached) => {
