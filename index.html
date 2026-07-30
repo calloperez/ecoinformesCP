@@ -18,6 +18,7 @@
 <link rel="icon" type="image/png" sizes="512x512" href="icon-512.png">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/dexie/3.2.4/dexie.js"></script>
 <style>
 :root{
   --ink:#1A1A1A; --gray-1:#4A4A4A; --gray-2:#777; --gray-3:#A8A8A8;
@@ -327,6 +328,7 @@ table.rp-duo td.sep, table.rp-duo th.sep{border-left:1px solid var(--line);paddi
   .rp-footer, table.rp-table tr{
     page-break-inside: avoid;
     break-inside: avoid;
+    break-inside: avoid-page;
   }
   /* Un título de sección nunca queda huérfano al pie: baja con su contenido. */
   .rp-section{ page-break-after: avoid; break-after: avoid; }
@@ -359,7 +361,7 @@ table.rp-duo td.sep, table.rp-duo th.sep{border-left:1px solid var(--line);paddi
     <div class="sidebar-foot">
       <button class="btn" id="btnNewPatient">+ Nuevo paciente</button>
       <div id="syncStatus" style="text-align:center;font-size:10px;color:var(--gray-3);margin-top:6px;">●  En línea</div>
-      <div style="text-align:center;font-size:10px;color:var(--gray-3);margin-top:2px;">build 2026-07-29-r75</div>
+      <div style="text-align:center;font-size:10px;color:var(--gray-3);margin-top:2px;">build 2026-07-29-r76</div>
     </div>
   </div>
   <div class="main" id="main"></div>
@@ -467,140 +469,177 @@ const SupabaseClient = (()=>{
   return { select, insert, update, del };
 })();
 
-/* ---------------- PatientService ---------------- */
 /* ================================================================
-   CAPA OFFLINE — LocalCache
-   Lee siempre desde localStorage (instantáneo, sin red).
-   Sincroniza con Supabase en segundo plano cuando hay conexión.
-   Si no hay red: guarda localmente y sincroniza cuando vuelve.
+   ARQUITECTURA OFFLINE-FIRST
+   - LocalDB (Dexie/IndexedDB): fuente de verdad LOCAL. Toda lectura y escritura
+     de la UI pasa por acá, nunca espera a la red.
+   - SyncEngine: cola persistente de operaciones pendientes (pending_ops). Cuando
+     hay conexión, la vacía contra Supabase (empuja) y trae cambios remotos más
+     nuevos que el último pull (resolviendo conflictos por 'updated_at', el que
+     tenga la marca más reciente gana — last-write-wins).
+   - Si Supabase/Render/la red no están disponibles, todo sigue funcionando: se
+     guarda local al instante y se sincroniza solo cuando vuelve la conexión.
    ================================================================ */
-/* ================================================================
-   CAPA DE DATOS — Simple y confiable
-   Supabase es la fuente de verdad.
-   localStorage = caché de lectura rápida + fallback offline.
-   Sin sincronización de IDs ni colas complejas.
-   ================================================================ */
-const DB = {
-  _get(k){ try{ return JSON.parse(localStorage.getItem(k)||'null'); }catch(e){ return null; } },
-  _set(k,v){ try{ localStorage.setItem(k,JSON.stringify(v)); return true; }catch(e){ return false; } },
-};
+const _dexie = new Dexie('EcoInformeDB');
+_dexie.version(1).stores({
+  patients: 'id, updated_at, nombre',
+  studies: 'id, patientId, fecha, updated_at',
+  pending_ops: 'id, ts',
+  meta: 'key'
+});
+const LocalDB = { patients: _dexie.patients, studies: _dexie.studies, pending_ops: _dexie.pending_ops, meta: _dexie.meta };
 
-const PatientService = (()=>{
-  const C = 'eco_pts_v3';
-  async function list(){
-    if(navigator.onLine){
+/* ---------------- SyncEngine ---------------- */
+const SyncEngine = (()=>{
+  let status = 'offline';
+  let syncing = false;
+  const listeners = [];
+  function onStatus(fn){ listeners.push(fn); fn(status); }
+  function setStatus(s){ status = s; listeners.forEach(fn=>{ try{ fn(s); }catch(e){} }); }
+  async function pendingCount(){ try{ return await LocalDB.pending_ops.count(); }catch(e){ return 0; } }
+
+  /* Cola persistente: una entrada por registro (id=table:recordId) — si se edita
+     el mismo paciente/estudio varias veces antes de sincronizar, la cola guarda
+     solo la última versión (no acumula entradas viejas de by en medio). */
+  async function enqueue(table, recordId, payload){
+    await LocalDB.pending_ops.put({ id: table+':'+recordId, table, recordId, kind:'upsert', payload, ts: Date.now() });
+  }
+  async function enqueueDelete(table, recordId){
+    await LocalDB.pending_ops.put({ id: table+':'+recordId, table, recordId, kind:'delete', payload:null, ts: Date.now() });
+  }
+
+  function toSupabaseRow(table, payload){
+    if(table==='patients') return { id:payload.id, nombre:payload.nombre||'', documento:payload.documento||'', edad:payload.edad||'', sexo:payload.sexo||'', updated_at:payload.updated_at };
+    /* studies: se envuelve en {id, patient_id, fecha, data} — updated_at viaja
+       DENTRO de 'data' (JSONB), así no hace falta ninguna columna nueva en Supabase. */
+    return { id:payload.id, patient_id:payload.patientId, fecha:payload.fecha||null, data:payload };
+  }
+
+  /* Procesa la cola en orden. Si un envío falla (Supabase pausado/inaccesible,
+     sin red), se corta ahí — la cola queda intacta y se reintenta en el próximo
+     ciclo, sin perder el orden ni los datos. */
+  async function flushQueue(){
+    const ops = await LocalDB.pending_ops.orderBy('ts').toArray();
+    for(const op of ops){
       try{
-        const rows = await SupabaseClient.select('patients','select=*&order=nombre.asc');
-        DB._set(C, rows);
-        return rows;
-      }catch(e){}
+        if(op.kind==='upsert') await SupabaseClient.insert(op.table, toSupabaseRow(op.table, op.payload));
+        else if(op.kind==='delete') await SupabaseClient.del(op.table, op.recordId);
+        await LocalDB.pending_ops.delete(op.id);
+      }catch(e){
+        console.warn('Sync: no se pudo sincronizar (se reintentará)', op.table, op.recordId, e.message);
+        return false;
+      }
     }
-    return DB._get(C) || [];
+    return true;
+  }
+
+  /* Trae de Supabase lo modificado después del último pull y lo mergea local
+     usando last-write-wins por 'updated_at'. Nunca pisa un cambio local más nuevo. */
+  async function pullRemote(){
+    try{
+      const sincePt = (await LocalDB.meta.get('lastPullPatients'))?.value || '1970-01-01T00:00:00Z';
+      const remotePatients = await SupabaseClient.select('patients', `select=*&updated_at=gt.${encodeURIComponent(sincePt)}&order=updated_at.asc`);
+      let newestPt = sincePt;
+      for(const rp of remotePatients){
+        const local = await LocalDB.patients.get(rp.id);
+        if(!local || !local.updated_at || new Date(rp.updated_at) > new Date(local.updated_at)) await LocalDB.patients.put(rp);
+        if(rp.updated_at && rp.updated_at > newestPt) newestPt = rp.updated_at;
+      }
+      if(remotePatients.length) await LocalDB.meta.put({key:'lastPullPatients', value:newestPt});
+    }catch(e){ console.warn('pullRemote patients falló (se reintenta luego)', e.message); }
+
+    try{
+      const sinceSt = (await LocalDB.meta.get('lastPullStudies'))?.value || '1970-01-01T00:00:00Z';
+      const remoteStudies = await SupabaseClient.select('studies',
+        `select=id,patient_id,fecha,data&data->>updated_at=gt.${encodeURIComponent(sinceSt)}&order=data->>updated_at.asc`);
+      let newestSt = sinceSt;
+      for(const rs of remoteStudies){
+        const flat = { ...(rs.data||{}), id: rs.id, patientId: rs.patient_id, fecha: rs.fecha };
+        const local = await LocalDB.studies.get(flat.id);
+        if(!local || !local.updated_at || new Date(flat.updated_at||0) > new Date(local.updated_at||0)) await LocalDB.studies.put(flat);
+        if(flat.updated_at && flat.updated_at > newestSt) newestSt = flat.updated_at;
+      }
+      if(remoteStudies.length) await LocalDB.meta.put({key:'lastPullStudies', value:newestSt});
+    }catch(e){ console.warn('pullRemote studies falló (se reintenta luego)', e.message); }
+  }
+
+  async function runSync(){
+    if(!navigator.onLine){ setStatus('offline'); return; }
+    if(syncing) return;
+    syncing = true;
+    setStatus('syncing');
+    try{
+      const pushedAll = await flushQueue();
+      if(pushedAll) await pullRemote();
+    } finally {
+      syncing = false;
+      setStatus(navigator.onLine ? 'online' : 'offline');
+    }
+  }
+  function kick(){ runSync(); }
+
+  function init(){
+    window.addEventListener('online', ()=>{ setStatus('syncing'); runSync(); });
+    window.addEventListener('offline', ()=> setStatus('offline'));
+    setInterval(runSync, 20000); // red flag de seguridad: reintenta cada 20s aunque
+                                  // el evento 'online' no dispare (frecuente en PWA iOS)
+    runSync();
+  }
+  return { init, onStatus, enqueue, enqueueDelete, kick, pendingCount };
+})();
+
+/* ---------------- PatientService ---------------- */
+const PatientService = (()=>{
+  async function list(){
+    const rows = await LocalDB.patients.toArray();
+    return rows.filter(p=>!p._deleted).sort((a,b)=>(a.nombre||'').localeCompare(b.nombre||''));
   }
   async function create(data){
-    const row = await SupabaseClient.insert('patients',
-      { id:data.id, nombre:data.nombre||'', documento:data.documento||'', edad:data.edad||'', sexo:data.sexo||'' });
-    const cached = (DB._get(C)||[]).filter(p=>p.id!==row.id); cached.push(row); DB._set(C, cached);
+    const row = { id: data.id || genId(), nombre:data.nombre||'', documento:data.documento||'', edad:data.edad||'', sexo:data.sexo||'', updated_at:new Date().toISOString() };
+    await LocalDB.patients.put(row);
+    await SyncEngine.enqueue('patients', row.id, row);
+    SyncEngine.kick();
     return row;
   }
   async function update(id, data){
-    const row = await SupabaseClient.update('patients', id, data);
-    const cached = (DB._get(C)||[]).map(p=> p.id===id ? {...p,...data} : p);
-    DB._set(C, cached);
+    const existing = (await LocalDB.patients.get(id)) || {id};
+    const row = { ...existing, ...data, id, updated_at:new Date().toISOString() };
+    await LocalDB.patients.put(row);
+    await SyncEngine.enqueue('patients', id, row);
+    SyncEngine.kick();
     return row;
   }
-  async function get(id){
-    const cached = (DB._get(C)||[]).find(p=>p.id===id);
-    if(cached) return cached;
-    const rows = await SupabaseClient.select('patients',`select=*&id=eq.${id}`);
-    return rows[0]||null;
-  }
+  async function get(id){ return (await LocalDB.patients.get(id)) || null; }
   async function remove(id){
-    await SupabaseClient.del('patients',id);
-    DB._set(C,(DB._get(C)||[]).filter(p=>p.id!==id));
+    await LocalDB.patients.delete(id);
+    await SyncEngine.enqueueDelete('patients', id);
+    SyncEngine.kick();
   }
   return { list, create, update, get, remove };
 })();
 
 /* ---------------- StudyService ---------------- */
 const StudyService = (()=>{
-  const C = 'eco_sts_v3';
-  function toRow(pid,d){ return { id:d.id, patient_id:pid, fecha:d.fecha||null, data:d }; }
-  function fromRow(r){ return { id:r.id, patientId:r.patient_id, savedAt:r.saved_at, fecha:r.fecha, ...(r.data||{}) }; }
-
-  /* Guarda el estudio completo en la caché local. Si no entra (cuota de
-     localStorage superada, p.ej. por imágenes), guarda una versión liviana SIN
-     imágenes y SIN marcar _full, de modo que al reabrir se relea desde Supabase
-     —que sí conserva las imágenes— en vez de devolver una copia vieja incompleta. */
-  function cacheFullStudy(study, patientId){
-    const pid = patientId!==undefined ? patientId : study.patientId;
-    const others = (DB._get(C)||[]).filter(s=>s.id!==study.id);
-    const full = {...study, patientId:pid, _full:true};
-    if(DB._set(C, [...others, full])) return;
-    /* Fallback: sin imágenes y sin _full → get() volverá a pedir a Supabase */
-    const {images, institutionLogo, _full, ...light} = full;
-    DB._set(C, [...others, {...light, patientId:pid}]);
-  }
-
   async function listByPatient(patientId){
-    if(navigator.onLine){
-      try{
-        const rows = await SupabaseClient.select('studies',
-          `select=id,patient_id,fecha,saved_at,data->>vi_fevi&patient_id=eq.${patientId}&order=fecha.desc`);
-        const list = rows.map(r=>({
-          id:r.id, patientId:r.patient_id, savedAt:r.saved_at, fecha:r.fecha,
-          vi_fevi: r['vi_fevi']||r['data->>vi_fevi']||r.vi_fevi||''
-        }));
-        /* Actualizar caché: guardar resúmenes sin sobreescribir estudios completos */
-        const full = (DB._get(C)||[]).filter(s=>s._full);
-        const fullIds = new Set(full.map(s=>s.id));
-        const others = (DB._get(C)||[]).filter(s=>s.patientId!==patientId);
-        DB._set(C, [...others, ...list.filter(s=>!fullIds.has(s.id)), ...full]);
-        return list;
-      }catch(e){}
-    }
-    return (DB._get(C)||[])
-      .filter(s=>s.patientId===patientId)
+    const rows = await LocalDB.studies.where('patientId').equals(patientId).toArray();
+    return rows.filter(s=>!s._deleted)
       .sort((a,b)=>(b.fecha||'').localeCompare(a.fecha||''))
-      .map(s=>({ id:s.id, patientId:s.patientId, savedAt:s.savedAt, fecha:s.fecha, vi_fevi:s.vi_fevi||'' }));
+      .map(s=>({ id:s.id, patientId:s.patientId, savedAt:s.updated_at, fecha:s.fecha, vi_fevi:s.vi_fevi||'' }));
   }
-
   async function create(patientId, data){
-    const row = await SupabaseClient.insert('studies', toRow(patientId, data));
-    const study = fromRow(row);
-    /* Guardar estudio completo en caché */
-    cacheFullStudy(study, patientId);
-    return study;
+    const row = { ...data, id: data.id || genId(), patientId, updated_at:new Date().toISOString() };
+    await LocalDB.studies.put(row);
+    await SyncEngine.enqueue('studies', row.id, row);
+    SyncEngine.kick();
+    return row;
   }
-
-  async function update(id, data){
-    await SupabaseClient.update('studies', id, { fecha:data.fecha||null, data });
-    /* Actualizar caché de forma resiliente (ver cacheFullStudy) */
-    const merged = {...(DB._get(C)||[]).find(s=>s.id===id), ...data,
-                    id, savedAt:new Date().toISOString()};
-    cacheFullStudy(merged, data.patientId);
-    return merged;
-  }
-
-  async function get(id){
-    /* Buscar en caché primero — si es completo, devolver directo */
-    const cached = (DB._get(C)||[]).find(s=>s.id===id && s._full);
-    if(cached) return cached;
-    /* Pedir a Supabase */
-    const rows = await SupabaseClient.select('studies',`select=*&id=eq.${id}`);
-    if(!rows[0]) return null;
-    const study = fromRow(rows[0]);
-    /* Guardar en caché (resiliente a cuota) */
-    cacheFullStudy(study, study.patientId);
-    return study;
-  }
-
+  async function get(id){ return (await LocalDB.studies.get(id)) || null; }
   async function remove(id){
-    await SupabaseClient.del('studies', id);
-    DB._set(C,(DB._get(C)||[]).filter(s=>s.id!==id));
+    await LocalDB.studies.delete(id);
+    await SyncEngine.enqueueDelete('studies', id);
+    SyncEngine.kick();
   }
-
-  return { listByPatient, create, update, get, remove };
+  return { listByPatient, create, get, remove };
 })();
 
 
@@ -1241,7 +1280,7 @@ const ReportEngine = (()=>{
         }
         if(diast){
           if(isAF){
-            out.push({ group:g.label, label:'Flujo mitral', value:'Monofásico (sin onda A)', unit:'', ref:'Bifásico (E/A)', out:true });
+            out.push({ group:g.label, label:'Flujo mitral', value:'Monofásico\u00A0(sin\u00A0onda\u00A0A)', unit:'', ref:'Bifásico (E/A)', out:true });
             out.push({ group:g.label, label:'Presión de llenado del VI', value:diast.lap, unit:'', ref:'Normal', out: diast.lap==='Elevada' });
           } else {
             out.push({ group:g.label, label:'Grado de función diastólica', value:diast.grade, unit:'', ref:'Normal', out: diast.cat!=='normal' });
@@ -2039,33 +2078,41 @@ const App = (()=>{
   let descOverride=null, conclOverride=null; // ediciones manuales
   let pendingImages=[]; // base64
 
-  /* Indicador de conexión */
-  function updateSyncStatus(){
+  /* Indicador de conexión / sincronización, alimentado por SyncEngine */
+  async function renderSyncStatus(state){
     const el = document.getElementById('syncStatus');
     if(!el) return;
-    const online = navigator.onLine;
-    el.style.color = online ? '#3a7d5c' : '#B3432A';
-    el.textContent = online ? '● En línea' : '○ Sin señal — guardando local';
+    const pending = await SyncEngine.pendingCount();
+    if(state==='syncing'){
+      el.style.color = '#1B6B6B';
+      el.textContent = '⟳ Sincronizando...';
+    } else if(state==='online'){
+      el.style.color = '#3a7d5c';
+      el.textContent = pending>0 ? ('● En línea · '+pending+' pendiente'+(pending>1?'s':'')) : '● En línea';
+    } else {
+      el.style.color = '#B3432A';
+      el.textContent = pending>0
+        ? ('○ Sin conexión · '+pending+' cambio'+(pending>1?'s':'')+' pendiente'+(pending>1?'s':''))
+        : '○ Sin conexión — guardando local';
+    }
   }
-  window.addEventListener('online', updateSyncStatus);
-  window.addEventListener('offline', updateSyncStatus);
-
-  /* Cuando el cache se refresca en segundo plano, actualiza la lista silenciosamente */
-  window._onPatientsRefreshed = ()=>{
-    PatientService.list().then(updated=>{ patients=updated; renderPatientList(); });
-  };
+  SyncEngine.onStatus((s)=>{
+    renderSyncStatus(s);
+    /* Al terminar de sincronizar (venir de 'syncing' a 'online'), refrescar la
+       lista de pacientes por si se trajeron cambios remotos nuevos (p.ej. otro
+       dispositivo, o datos cargados antes de instalar esta versión). */
+    if(s==='online') PatientService.list().then(updated=>{ patients=updated; renderPatientList(); });
+  });
 
   /* ---------- carga inicial ---------- */
   async function init(){
-    updateSyncStatus();
-    /* Carga instantánea desde cache local — no espera red */
+    /* Carga instantánea desde IndexedDB — nunca espera a la red */
     patients = await PatientService.list();
     renderPatientList();
     renderWelcome();
     document.getElementById('patientSearch').oninput = renderPatientList;
     document.getElementById('btnNewPatient').onclick = createPatientFlow;
-    /* Sincronizar cola pendiente si hay conexión */
-    /* sync handled by PatientService */
+    SyncEngine.init();
   }
 
   /* Gesto "deslizar para borrar": funciona con touch (celular) y mouse (PC).
@@ -2176,31 +2223,23 @@ const App = (()=>{
   }
 
   /* ---------- crear paciente ---------- */
-  /* Se separa la recolección de datos (prompts) del guardado en sí: si el insert
-     falla por red inestable (p.ej. "Load failed" transitorio), se puede reintentar
-     el guardado sin que el médico tenga que volver a tipear nombre/documento/edad/sexo. */
+  /* El guardado es local (IndexedDB) e instantáneo — no depende de la red. La
+     sincronización con Supabase ocurre en segundo plano (ver SyncEngine) y nunca
+     bloquea ni puede hacer que esto falle por falta de conexión. */
   async function createPatientFlow(){
     const nombre = prompt('Nombre y apellido del paciente:');
     if(!nombre) return;
     const documento = prompt('Documento (opcional):') || '';
     const edad = prompt('Edad (opcional):') || '';
     const sexo = normalizeSexoInput(prompt('Sexo (M/F, opcional):') || '');
-    /* El id se genera UNA vez acá, antes de cualquier intento de red, y se reusa
-       en todos los reintentos (incluido si el médico vuelve a tocar "reintentar"
-       manualmente) — así nunca se crea un paciente duplicado. */
-    await intentarCrearPaciente({ id: genId(), nombre, documento, edad, sexo });
-  }
-
-  async function intentarCrearPaciente(data){
     try{
-      const p = await PatientService.create(data);
+      const p = await PatientService.create({ id: genId(), nombre, documento, edad, sexo });
       patients = await PatientService.list();
       renderPatientList();
       openPatient(p.id);
     }catch(e){
       console.error(e);
-      const reintentar = confirm('No se pudo guardar a "'+data.nombre+'" (red inestable o falla temporal).\n\n'+e.message+'\n\n¿Reintentar guardar sin volver a tipear los datos?');
-      if(reintentar) return intentarCrearPaciente(data);
+      alert('No se pudo guardar el paciente localmente.\n\n'+e.message);
     }
   }
 
@@ -3093,11 +3132,10 @@ const App = (()=>{
     currentStudy.descManual = descOverride;
     currentStudy.conclManual = conclOverride;
     /* currentStudy.id ya existe siempre (se genera al abrir el editor, sea estudio
-       nuevo o existente — ver openStudyEditor). StudyService.create() ahora hace
-       upsert por ese id: inserta si es la primera vez, actualiza si ya existía.
-       Por eso ya no hace falta bifurcar entre create/update acá — guardar dos, tres
-       o diez veces el MISMO estudio (incluso tras un "falló, reintentar" manual)
-       siempre pisa la misma fila, nunca crea una duplicada. */
+       nuevo o existente — ver openStudyEditor). StudyService.create() escribe a
+       IndexedDB al instante (nunca depende de la red) y hace upsert por ese id
+       contra Supabase en segundo plano vía SyncEngine: guardar dos, tres o diez
+       veces el MISMO estudio siempre pisa el mismo registro, nunca duplica. */
     try{
       const saved = await StudyService.create(patientId, currentStudy);
       if(saved) currentStudy.id = saved.id;
