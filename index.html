@@ -360,8 +360,8 @@ table.rp-duo td.sep, table.rp-duo th.sep{border-left:1px solid var(--line);paddi
     <div class="patient-list" id="patientList"></div>
     <div class="sidebar-foot">
       <button class="btn" id="btnNewPatient">+ Nuevo paciente</button>
-      <div id="syncStatus" style="text-align:center;font-size:10px;color:var(--gray-3);margin-top:6px;">●  En línea</div>
-      <div style="text-align:center;font-size:10px;color:var(--gray-3);margin-top:2px;">build 2026-07-30-r79</div>
+      <div id="syncStatus" style="text-align:center;font-size:10px;color:var(--gray-3);margin-top:6px;cursor:pointer;text-decoration:underline dotted;" title="Tocar para ver diagnóstico de sincronización">●  En línea</div>
+      <div style="text-align:center;font-size:10px;color:var(--gray-3);margin-top:2px;">build 2026-07-30-r80</div>
     </div>
   </div>
   <div class="main" id="main"></div>
@@ -494,9 +494,15 @@ const SyncEngine = (()=>{
   let status = 'offline';
   let syncing = false;
   const listeners = [];
+  let lastErrors = []; // últimos errores de push/pull, para diagnosticar sin DevTools
   function onStatus(fn){ listeners.push(fn); fn(status); }
   function setStatus(s){ status = s; listeners.forEach(fn=>{ try{ fn(s); }catch(e){} }); }
   async function pendingCount(){ try{ return await LocalDB.pending_ops.count(); }catch(e){ return 0; } }
+  function pushError(where, table, msg){
+    lastErrors.unshift({ when:new Date().toISOString(), where, table, msg:String(msg) });
+    if(lastErrors.length>10) lastErrors.length = 10;
+  }
+  function getLastErrors(){ return lastErrors; }
 
   /* Cola persistente: una entrada por registro (id=table:recordId) — si se edita
      el mismo paciente/estudio varias veces antes de sincronizar, la cola guarda
@@ -533,6 +539,7 @@ const SyncEngine = (()=>{
         await LocalDB.pending_ops.delete(op.id);
       }catch(e){
         console.warn('Sync: no se pudo sincronizar (se reintentará)', op.table, op.recordId, e.message);
+        pushError('push', op.table, e.message);
         allOk = false;
         // seguimos con el resto de la cola en vez de cortar acá
       }
@@ -565,7 +572,7 @@ const SyncEngine = (()=>{
         } else if(rp.updated_at > newestPt) newestPt = rp.updated_at;
       }
       if(remotePatients.length) await LocalDB.meta.put({key:'lastPullPatients', value:newestPt});
-    }catch(e){ console.warn('pullRemote patients falló (se reintenta luego)', e.message); }
+    }catch(e){ console.warn('pullRemote patients falló (se reintenta luego)', e.message); pushError('pull','patients', e.message); }
 
     try{
       const sinceSt = (await LocalDB.meta.get('lastPullStudies'))?.value || '1970-01-01T00:00:00Z';
@@ -584,7 +591,7 @@ const SyncEngine = (()=>{
         } else if(flat.updated_at > newestSt) newestSt = flat.updated_at;
       }
       if(remoteStudies.length) await LocalDB.meta.put({key:'lastPullStudies', value:newestSt});
-    }catch(e){ console.warn('pullRemote studies falló (se reintenta luego)', e.message); }
+    }catch(e){ console.warn('pullRemote studies falló (se reintenta luego)', e.message); pushError('pull','studies', e.message); }
   }
 
   async function runSync(){
@@ -617,7 +624,7 @@ const SyncEngine = (()=>{
                                   // el evento 'online' no dispare (frecuente en PWA iOS)
     runSync();
   }
-  return { init, onStatus, enqueue, enqueueDelete, kick, pendingCount };
+  return { init, onStatus, enqueue, enqueueDelete, kick, pendingCount, getLastErrors };
 })();
 
 /* ---------------- PatientService ---------------- */
@@ -2130,6 +2137,16 @@ const App = (()=>{
   }
   SyncEngine.onStatus((s)=>{
     renderSyncStatus(s);
+    const el = document.getElementById('syncStatus');
+    if(el && !el._diagBound){
+      el._diagBound = true;
+      el.addEventListener('click', ()=>{
+        const errs = SyncEngine.getLastErrors();
+        if(!errs.length){ alert('Sin errores de sincronización registrados en esta sesión.'); return; }
+        const txt = errs.map(e=>`[${e.when.slice(11,19)}] ${e.where.toUpperCase()} · ${e.table}\n${e.msg}`).join('\n\n');
+        alert('Últimos errores de sync (más reciente primero):\n\n'+txt);
+      });
+    }
     /* Al terminar de sincronizar (venir de 'syncing' a 'online'), refrescar la
        lista de pacientes por si se trajeron cambios remotos nuevos (p.ej. otro
        dispositivo, o datos cargados antes de instalar esta versión). */
