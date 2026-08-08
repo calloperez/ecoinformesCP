@@ -7,7 +7,7 @@
      conexión (no se queda pegado en caché). Si no hay red, usa la copia cacheada.
    - Assets y librerías CDN -> cache-first: carga instantánea y funciona offline.
    ---------------------------------------------------------------------------- */
-const VERSION = 'v81';
+const VERSION = 'v82';
 const CACHE = 'ecoinforme-' + VERSION;
 const ASSETS = [
   './',
@@ -39,8 +39,20 @@ self.addEventListener('activate', (e) => {
 self.addEventListener('fetch', (e) => {
   const req = e.request;
   if (req.method !== 'GET') return;
+  const url = new URL(req.url);
   const accept = req.headers.get('accept') || '';
   const isHTML = req.mode === 'navigate' || accept.includes('text/html');
+  /* Las llamadas a la API REST de Supabase (o cualquier /rest/v1/) NUNCA se
+     cachean: son datos mutables, y el cache-first genérico de abajo estaba
+     devolviendo respuestas viejas (p.ej. "0 registros nuevos") para siempre,
+     porque la URL de pull es idéntica mientras el cursor no avanza — con lo
+     cual el Service Worker cortocircuitaba la sincronización sin que hubiera
+     ningún error visible. Siempre network-only acá. */
+  const isSupabaseApi = url.hostname.endsWith('.supabase.co') && url.pathname.includes('/rest/v1/');
+  if (isSupabaseApi) {
+    e.respondWith(fetch(req));
+    return;
+  }
   if (isHTML) {
     // network-first: siempre intenta la versión más nueva
     e.respondWith(
