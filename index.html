@@ -395,7 +395,7 @@ table.rp-duo td.sep, table.rp-duo th.sep{border-left:1px solid var(--line);paddi
     <div class="sidebar-foot">
       <button class="btn" id="btnNewPatient">+ Nuevo paciente</button>
       <div id="syncStatus" style="text-align:center;font-size:10px;color:var(--gray-3);margin-top:6px;">●  En línea</div>
-      <div style="text-align:center;font-size:10px;color:var(--gray-3);margin-top:2px;">build 2026-08-12-r85</div>
+      <div style="text-align:center;font-size:10px;color:var(--gray-3);margin-top:2px;">build 2026-08-12-r86</div>
     </div>
   </div>
   <div class="main" id="main"></div>
@@ -3226,6 +3226,7 @@ const AUTH_HASH_FALLBACK = '25b214c560294b87dec19823f304382a159c9223af8d8466a855
 const AUTH_LS_KEY = 'eco_auth_ok_v1';
 const AuthGate = (()=>{
   let currentHash = AUTH_HASH_FALLBACK;
+  let hashReadyPromise = null;
 
   async function sha256Hex(str){
     const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
@@ -3233,9 +3234,18 @@ const AuthGate = (()=>{
   }
   async function fetchCurrentHash(){
     try{
-      const res = await fetch(SUPABASE_URL + '/rest/v1/app_settings?id=eq.1&select=auth_hash', {
-        headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + SUPABASE_KEY }
-      });
+      // cache:'no-store' + parámetro de cache-busting: esta consulta SIEMPRE
+      // tiene que pegarle a la red, nunca servirse de una respuesta vieja
+      // guardada por el navegador (si no, tras cambiar la clave por el flujo
+      // de "olvidé mi clave", el gate seguiría comparando contra el hash
+      // anterior y la clave nueva no funcionaría hasta limpiar caché).
+      const res = await fetch(
+        SUPABASE_URL + '/rest/v1/app_settings?id=eq.1&select=auth_hash&_=' + Date.now(),
+        {
+          headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + SUPABASE_KEY },
+          cache: 'no-store'
+        }
+      );
       if(!res.ok) return;
       const rows = await res.json();
       if(rows && rows[0] && rows[0].auth_hash) currentHash = rows[0].auth_hash;
@@ -3250,6 +3260,7 @@ const AuthGate = (()=>{
     const err = document.getElementById('authErr');
     const val = input.value || '';
     if(!val){ return; }
+    if(hashReadyPromise){ try{ await hashReadyPromise; }catch(e){} } // esperar el hash vigente antes de comparar
     const hash = await sha256Hex(val);
     if(hash === currentHash){
       try{ localStorage.setItem(AUTH_LS_KEY, '1'); }catch(e){}
@@ -3285,7 +3296,7 @@ const AuthGate = (()=>{
   function init(){
     let already = false;
     try{ already = localStorage.getItem(AUTH_LS_KEY) === '1'; }catch(e){}
-    fetchCurrentHash(); // corre en paralelo; si ya estaba desbloqueado no hace falta esperarlo
+    hashReadyPromise = fetchCurrentHash(); // se guarda la promesa: attempt() la espera antes de comparar
     if(already){ startApp(); return; }
     const input = document.getElementById('authInput');
     const btn = document.getElementById('authBtn');
