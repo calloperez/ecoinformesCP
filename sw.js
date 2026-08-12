@@ -7,7 +7,7 @@
      conexión (no se queda pegado en caché). Si no hay red, usa la copia cacheada.
    - Assets y librerías CDN -> cache-first: carga instantánea y funciona offline.
    ---------------------------------------------------------------------------- */
-const VERSION = 'v82';
+const VERSION = 'v83';
 const CACHE = 'ecoinforme-' + VERSION;
 const ASSETS = [
   './',
@@ -39,20 +39,18 @@ self.addEventListener('activate', (e) => {
 self.addEventListener('fetch', (e) => {
   const req = e.request;
   if (req.method !== 'GET') return;
-  const url = new URL(req.url);
-  const accept = req.headers.get('accept') || '';
-  const isHTML = req.mode === 'navigate' || accept.includes('text/html');
-  /* Las llamadas a la API REST de Supabase (o cualquier /rest/v1/) NUNCA se
-     cachean: son datos mutables, y el cache-first genérico de abajo estaba
-     devolviendo respuestas viejas (p.ej. "0 registros nuevos") para siempre,
-     porque la URL de pull es idéntica mientras el cursor no avanza — con lo
-     cual el Service Worker cortocircuitaba la sincronización sin que hubiera
-     ningún error visible. Siempre network-only acá. */
-  const isSupabaseApi = url.hostname.endsWith('.supabase.co') && url.pathname.includes('/rest/v1/');
-  if (isSupabaseApi) {
+  /* IMPORTANTE (fix r82): las respuestas REST de Supabase nunca deben pasar
+     por la caché del Service Worker. Si se cachean, un dispositivo puede
+     recibir una respuesta vieja (o la de otro request) en vez de pegarle
+     a la red, y datos creados en un dispositivo (ej. iPhone) no aparecen
+     en otro (ej. Mac) aunque haya conexión. Network-only, sin cache.put
+     ni caches.match, para todo lo que sea *.supabase.co/rest/v1/*. */
+  if (req.url.includes('.supabase.co/rest/v1/')) {
     e.respondWith(fetch(req));
     return;
   }
+  const accept = req.headers.get('accept') || '';
+  const isHTML = req.mode === 'navigate' || accept.includes('text/html');
   if (isHTML) {
     // network-first: siempre intenta la versión más nueva
     e.respondWith(
