@@ -395,7 +395,8 @@ table.rp-duo td.sep, table.rp-duo th.sep{border-left:1px solid var(--line);paddi
     <div class="sidebar-foot">
       <button class="btn" id="btnNewPatient">+ Nuevo paciente</button>
       <div id="syncStatus" style="text-align:center;font-size:10px;color:var(--gray-3);margin-top:6px;">●  En línea</div>
-      <div style="text-align:center;font-size:10px;color:var(--gray-3);margin-top:2px;">build 2026-08-12-r87</div>
+      <button id="btnLogout" style="width:100%;margin-top:8px;padding:6px;border:1px solid var(--line);background:transparent;color:var(--gray-2);border-radius:6px;font-size:11px;cursor:pointer;">Cerrar sesión</button>
+      <div style="text-align:center;font-size:10px;color:var(--gray-3);margin-top:6px;">build 2026-08-13-r88</div>
     </div>
   </div>
   <div class="main" id="main"></div>
@@ -3313,6 +3314,23 @@ const AuthGate = (()=>{
       forgotBox.style.display = 'block';
     });
     forgotBtn.addEventListener('click', forgotPassword);
+
+    /* Botón "Cerrar sesión" en el sidebar: vive fuera del authGate, en el DOM
+       principal de la app (oculto por display:none del propio authGate mientras
+       no hay sesión). Al tocarlo, se borra el flag de localStorage y se recarga
+       la página: init() vuelve a correr desde cero, no encuentra el flag, y
+       muestra la pantalla de clave otra vez. Solo afecta a este dispositivo/
+       navegador — no invalida el hash en Supabase ni cierra sesión en otros
+       dispositivos. */
+    const logoutBtn = document.getElementById('btnLogout');
+    if(logoutBtn){
+      logoutBtn.addEventListener('click', ()=>{
+        if(!confirm('¿Cerrar sesión? Vas a tener que ingresar la clave de nuevo.')) return;
+        try{ localStorage.removeItem(AUTH_LS_KEY); }catch(e){}
+        location.reload();
+      });
+    }
+
     setTimeout(()=> input.focus(), 50);
   }
   return { init };
