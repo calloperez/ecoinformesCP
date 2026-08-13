@@ -61,7 +61,7 @@ button{font-family:inherit;}
 .patient-list{flex:1;overflow-y:auto;}
 .patient-item{padding:12px 16px;border-bottom:1px solid var(--line);cursor:pointer;}
 .patient-item:hover{background:var(--bg);}
-.patient-item.active{background:var(--bg-2);}
+.patient-item.active{background:var(--bg-2);border-left:3px solid var(--ink);padding-left:13px;}
 .patient-item .nm{font-size:13.5px;font-weight:600;}
 .patient-item .meta{font-size:11.5px;color:var(--gray-2);margin-top:2px;}
 .sidebar-foot{padding:14px 16px;border-top:1px solid var(--line);}
@@ -315,17 +315,24 @@ table.rp-duo td.sep, table.rp-duo th.sep{border-left:1px solid var(--line);paddi
   .editor{flex-direction:column;height:auto;}
   .form-pane,.report-pane{width:100%;min-width:0;border-right:none;height:auto;}
 }
-@media (max-width:760px){
-  .app{flex-direction:column;height:100vh;overflow:hidden;}
+@media screen and (max-width:760px){
   /* En mobile, la lista de pacientes ocupa toda la pantalla (antes se
      comprimía a max-height:40vh, dejando muy poco lugar para los nombres).
      Al abrir un paciente/estudio, .main pasa a ocupar toda la pantalla y el
-     sidebar se oculta (ver body.detail-open más abajo) — patrón estándar de
-     "lista -> detalle" en mobile, con el botón "← Pacientes" para volver. */
-  .sidebar{width:100%;height:100vh;max-height:none;}
-  .main{height:100vh;}
-  body.detail-open .sidebar{display:none;}
-  body:not(.detail-open) .main{display:none;}
+     sidebar se desliza fuera de vista (ver body.detail-open más abajo) —
+     patrón "lista -> detalle" en mobile, con el botón "← Pacientes" para
+     volver. .app pasa a ser el contenedor posicionado del que .sidebar y
+     .main se superponen (position:absolute) y se deslizan con transform,
+     en vez de aparecer/desaparecer de golpe con display:none. Calificado
+     como "screen and" a propósito, para no interferir nunca con @media print
+     (que ya fuerza sus propios display/width/height con !important). */
+  .app{position:relative;height:100vh;overflow:hidden;}
+  .sidebar{position:absolute;inset:0;width:100%;height:100vh;max-height:none;
+    transform:translateX(0);transition:transform .28s cubic-bezier(.4,0,.2,1);z-index:2;}
+  .main{position:absolute;inset:0;width:100%;height:100vh;
+    transform:translateX(100%);transition:transform .28s cubic-bezier(.4,0,.2,1);z-index:1;}
+  body.detail-open .sidebar{transform:translateX(-100%);}
+  body.detail-open .main{transform:translateX(0);z-index:2;}
   .btn-back-mobile{display:inline-flex;}
 }
 
@@ -2289,6 +2296,9 @@ const App = (()=>{
     setMobileDetail(false);
     document.getElementById('main').innerHTML = `
       <div class="empty-state">
+        <svg width="72" height="28" viewBox="0 0 120 40" fill="none" xmlns="http://www.w3.org/2000/svg" style="margin-bottom:16px;" aria-hidden="true">
+          <path d="M2 20 H30 L38 6 L48 34 L58 12 L66 20 H118" stroke="var(--gray-3)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
         <h2>Seleccioná un paciente</h2>
         <p>O creá uno nuevo para iniciar un estudio.</p>
       </div>`;
@@ -2373,7 +2383,7 @@ const App = (()=>{
         <div class="section-label">Historial de estudios</div>
         <div id="studyHistory"></div>
       </div>`;
-    document.getElementById('btnBackToList').onclick = ()=>{ currentPatientId=null; renderPatientList(); renderWelcome(); };
+    document.getElementById('btnBackToList').onclick = ()=>{ renderPatientList(); renderWelcome(); };
     document.getElementById('btnNewStudy').onclick = ()=> openStudyEditor(id, null);
     document.getElementById('btnEditPatient').onclick = ()=> editPatientFlow(patient);
     const hist = document.getElementById('studyHistory');
