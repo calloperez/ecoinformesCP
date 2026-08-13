@@ -89,6 +89,7 @@ button{font-family:inherit;}
 .btn-sm{border:1px solid var(--line);background:var(--paper);color:var(--ink);border-radius:6px;
   padding:7px 12px;font-size:12.5px;font-weight:600;cursor:pointer;}
 .btn-sm.primary{background:var(--ink);color:#fff;border-color:var(--ink);}
+.btn-back-mobile{display:none;}
 .content{max-width:1000px;margin:0 auto;padding:28px;}
 
 /* empty / welcome */
@@ -315,9 +316,17 @@ table.rp-duo td.sep, table.rp-duo th.sep{border-left:1px solid var(--line);paddi
   .form-pane,.report-pane{width:100%;min-width:0;border-right:none;height:auto;}
 }
 @media (max-width:760px){
-  .app{flex-direction:column;}
-  .sidebar{width:100%;height:auto;max-height:40vh;}
-  .main{height:auto;}
+  .app{flex-direction:column;height:100vh;overflow:hidden;}
+  /* En mobile, la lista de pacientes ocupa toda la pantalla (antes se
+     comprimía a max-height:40vh, dejando muy poco lugar para los nombres).
+     Al abrir un paciente/estudio, .main pasa a ocupar toda la pantalla y el
+     sidebar se oculta (ver body.detail-open más abajo) — patrón estándar de
+     "lista -> detalle" en mobile, con el botón "← Pacientes" para volver. */
+  .sidebar{width:100%;height:100vh;max-height:none;}
+  .main{height:100vh;}
+  body.detail-open .sidebar{display:none;}
+  body:not(.detail-open) .main{display:none;}
+  .btn-back-mobile{display:inline-flex;}
 }
 
 /* ---------- IMPRESIÓN ---------- */
@@ -2265,8 +2274,19 @@ const App = (()=>{
     }
   }
 
+  /* En mobile (ver @media max-width:760px), la lista de pacientes y el
+     contenido principal (.main) ocupan pantalla completa por turnos, nunca
+     apilados — antes la lista quedaba comprimida a 40vh de alto. La clase
+     'detail-open' en <body> decide cuál de los dos se muestra: presente =
+     .main a pantalla completa (paciente/estudio abierto); ausente = lista
+     de pacientes a pantalla completa. En desktop no tiene ningún efecto. */
+  function setMobileDetail(on){
+    document.body.classList.toggle('detail-open', !!on);
+  }
+
   function renderWelcome(){
     showFloatBtn(false);
+    setMobileDetail(false);
     document.getElementById('main').innerHTML = `
       <div class="empty-state">
         <h2>Seleccioná un paciente</h2>
@@ -2322,6 +2342,7 @@ const App = (()=>{
   /* ---------- pantalla detalle paciente ---------- */
   async function openPatient(id){
     showFloatBtn(false);
+    setMobileDetail(true);
     currentPatientId = id;
     renderPatientList();
     let patient, studies;
@@ -2337,6 +2358,7 @@ const App = (()=>{
       <div class="topbar">
         <div class="crumbs"><b>${patient.nombre}</b> ${patient.documento?(' · '+patient.documento):''}</div>
         <div class="actions">
+          <button class="btn-sm btn-back-mobile" id="btnBackToList">← Pacientes</button>
           <button class="btn-sm" id="btnEditPatient">Editar datos</button>
           <button class="btn-sm primary" id="btnNewStudy">+ Nuevo estudio</button>
         </div>
@@ -2351,6 +2373,7 @@ const App = (()=>{
         <div class="section-label">Historial de estudios</div>
         <div id="studyHistory"></div>
       </div>`;
+    document.getElementById('btnBackToList').onclick = ()=>{ currentPatientId=null; renderPatientList(); renderWelcome(); };
     document.getElementById('btnNewStudy').onclick = ()=> openStudyEditor(id, null);
     document.getElementById('btnEditPatient').onclick = ()=> editPatientFlow(patient);
     const hist = document.getElementById('studyHistory');
@@ -2385,6 +2408,7 @@ const App = (()=>{
   /* ---------- editor de estudio ---------- */
   async function openStudyEditor(patientId, studyId){
     showFloatBtn(true);
+    setMobileDetail(true);
     const patient = await PatientService.get(patientId);
     /* El id del estudio nuevo se genera ACÁ, al abrir el editor, no al guardar. Así,
        si "Guardar" falla (o solo parece fallar por una respuesta perdida) y el médico
