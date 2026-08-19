@@ -1175,7 +1175,9 @@ const FIELD_GROUPS = [
     ['tsvi_vtitsvi','VTI TSVI (cm)'],
     ['vao_vmax','Vmax (m/s)'],['vao_gradm','Gradiente medio (mmHg)'],['vao_area','Área valvular (cm²)'],
     ['vao_vtiao','VTI Ao (cm)']
-  ], extra:[['vao_morf','Morfología',['Tricúspide','Bicúspide','Prótesis']],['vao_insuf','Insuficiencia',['','Leve','Moderada','Moderada-Severa','Severa']]],
+  ], extra:[['vao_morf','Morfología',['Tricúspide','Bicúspide','Prótesis']],
+    ['vao_patologia','Patología / calcificación',['','Sin calcificación significativa','Esclerosis leve','Calcificación moderada','Calcificación severa','Degenerativa','Reumática','Vegetaciones / Endocarditis']],
+    ['vao_insuf','Insuficiencia',['','Leve','Moderada','Moderada-Severa','Severa']]],
     conditionalOn:'vao_insuf', conditionalValue_in:['Moderada','Moderada-Severa','Severa'],
     conditionalLabel:'Cuantificación de insuficiencia aórtica (ASE/ESC)',
     conditionalFields:[
@@ -1191,7 +1193,9 @@ const FIELD_GROUPS = [
   ]},
   {id:'vmi', label:'Válvula mitral', express:true, fields:[
     ['vmi_vmax','Vmax (m/s)'],['vmi_gradm','Gradiente medio (mmHg)'],['vmi_area','Área valvular (cm²)'],['vmi_pha','PHT (ms)']
-  ], extra:[['vmi_morf','Morfología',['Normal','Prolapso','Calcificación','Reumática','Prótesis']],['vmi_insuf','Insuficiencia',['','Leve','Moderada','Moderada-Severa','Severa']]],
+  ], extra:[['vmi_morf','Morfología',['Normal','Prolapso','Calcificación','Reumática','Prótesis']],
+    ['vmi_patologia','Patología / calcificación',['','Sin calcificación significativa','Calcificación anular','Calcificación de valvas','Degenerativa / Mixomatosa','Reumática','Vegetaciones / Endocarditis']],
+    ['vmi_insuf','Insuficiencia',['','Leve','Moderada','Moderada-Severa','Severa']]],
     conditionalOn:'vmi_insuf', conditionalValue_in:['Leve','Moderada','Moderada-Severa','Severa'],
     conditionalLabel:'Cuantificación de insuficiencia mitral (ASE/ESC)',
     conditionalFields:[
@@ -1463,22 +1467,31 @@ const ReportEngine = (()=>{
 
     /* 9. Válvulas, en una sola frase */
     const valveClauses = [];
+    /* 'Sin calcificación significativa' es el valor por defecto de "no hay hallazgo
+       para reportar" en el desplegable — solo se agrega a la frase cuando el médico
+       eligió algo clínicamente relevante (calcificación, esclerosis, etc.). */
+    const vaoPatNotable = study.vao_patologia && study.vao_patologia!=='Sin calcificación significativa';
+    const vmiPatNotable = study.vmi_patologia && study.vmi_patologia!=='Sin calcificación significativa';
     const aoClass = ClinicalEngine.classifyAortic(study);
     if(study.vao_morf==='Prótesis'){
       valveClauses.push('prótesis valvular en posición aórtica'+(study.vao_insuf?(' con insuficiencia de grado '+study.vao_insuf.toLowerCase()):' normofuncionante'));
-    } else if(study.vao_morf || aoClass){
+    } else if(study.vao_morf || aoClass || vaoPatNotable){
       let s = 'válvula aórtica '+(study.vao_morf?study.vao_morf.toLowerCase():'');
       if(aoClass) s += aoClass.cat==='normal' ? ' sin estenosis significativa' : ' con '+aoClass.label.toLowerCase();
       s += study.vao_insuf ? (', insuficiencia '+study.vao_insuf.toLowerCase()) : ', sin insuficiencia significativa';
+      if(vaoPatNotable) s += ', '+study.vao_patologia.toLowerCase();
       valveClauses.push(s);
     }
     const tsviGrad = ClinicalEngine.num(study.tsvi_gradm);
     if(tsviGrad!==null && tsviGrad>=30) valveClauses.push('gradiente del TSVI elevado ('+tsviGrad+' mmHg), sugestivo de obstrucción dinámica');
     if(study.vmi_morf==='Calcificación'){
-      valveClauses.push('esclerocalcificación del aparato mitral'+(study.vmi_insuf?(' con insuficiencia '+study.vmi_insuf.toLowerCase()):''));
-    } else if(study.vmi_morf || study.vmi_insuf){
+      let s = 'esclerocalcificación del aparato mitral'+(study.vmi_insuf?(' con insuficiencia '+study.vmi_insuf.toLowerCase()):'');
+      if(vmiPatNotable) s += ' ('+study.vmi_patologia.toLowerCase()+')';
+      valveClauses.push(s);
+    } else if(study.vmi_morf || study.vmi_insuf || vmiPatNotable){
       let s = 'válvula mitral '+(study.vmi_morf&&study.vmi_morf!=='Normal'?study.vmi_morf.toLowerCase():'de apertura adecuada');
       s += study.vmi_insuf ? (', insuficiencia '+study.vmi_insuf.toLowerCase()) : ', sin regurgitación significativa';
+      if(vmiPatNotable) s += ', '+study.vmi_patologia.toLowerCase();
       valveClauses.push(s);
     }
     if(study.vtr_insuf) valveClauses.push('insuficiencia tricuspídea '+study.vtr_insuf.toLowerCase());
@@ -1519,7 +1532,13 @@ const ReportEngine = (()=>{
     }
     const aoClass = ClinicalEngine.classifyAortic(study);
     if(aoClass && aoClass.cat!=='normal'){ lines.push(aoClass.label+'.'); anyPath=true; }
+    if(study.vao_patologia && study.vao_patologia!=='Sin calcificación significativa'){
+      lines.push('Válvula aórtica: '+study.vao_patologia.toLowerCase()+'.'); anyPath=true;
+    }
     if(study.vao_insuf){ lines.push('Insuficiencia aórtica '+study.vao_insuf.toLowerCase()+'.'); anyPath=true; }
+    if(study.vmi_patologia && study.vmi_patologia!=='Sin calcificación significativa'){
+      lines.push('Válvula mitral: '+study.vmi_patologia.toLowerCase()+'.'); anyPath=true;
+    }
     if(study.vmi_insuf){ lines.push('Insuficiencia mitral '+study.vmi_insuf.toLowerCase()+'.'); anyPath=true; }
     const diast = ClinicalEngine.classifyDiastolic(study);
     const isAFConcl = study.p_ritmo === 'Fibrilación auricular';
@@ -1540,7 +1559,9 @@ const ReportEngine = (()=>{
     if(psap!==null && psap>35){ lines.push('Datos compatibles con hipertensión pulmonar (PSAP '+psap+' mmHg).'); anyPath=true; }
     (study.hallazgos||[]).forEach(h=>{ lines.push(h+'.'); anyPath=true; });
     if(!anyPath) return 'Ecocardiograma Doppler Color dentro de límites normales.\nFunción sistólica biventricular conservada.\nSin valvulopatías significativas.';
-    const sinValvulopatia = !study.vmi_insuf && !study.vao_insuf && !study.vtr_insuf && !study.vpu_insuf && (!aoClass || aoClass.cat==='normal');
+    const sinValvulopatia = !study.vmi_insuf && !study.vao_insuf && !study.vtr_insuf && !study.vpu_insuf && (!aoClass || aoClass.cat==='normal')
+      && !(study.vao_patologia && study.vao_patologia!=='Sin calcificación significativa')
+      && !(study.vmi_patologia && study.vmi_patologia!=='Sin calcificación significativa');
     if(sinValvulopatia) lines.push('Sin otras valvulopatías significativas.');
     return lines.join('\n');
   }
@@ -2294,6 +2315,7 @@ const App = (()=>{
   function renderWelcome(){
     showFloatBtn(false);
     setMobileDetail(false);
+    document.title = 'EcoInforme';
     document.getElementById('main').innerHTML = `
       <div class="empty-state">
         <svg width="72" height="28" viewBox="0 0 120 40" fill="none" xmlns="http://www.w3.org/2000/svg" style="margin-bottom:16px;" aria-hidden="true">
@@ -2353,6 +2375,7 @@ const App = (()=>{
   async function openPatient(id){
     showFloatBtn(false);
     setMobileDetail(true);
+    document.title = 'EcoInforme'; // se sale del editor: restaurar título genérico
     currentPatientId = id;
     renderPatientList();
     let patient, studies;
@@ -2420,6 +2443,15 @@ const App = (()=>{
     showFloatBtn(true);
     setMobileDetail(true);
     const patient = await PatientService.get(patientId);
+    /* El título de la pestaña/página se cambia al nombre del paciente ACÁ, al
+       entrar al editor — no recién al tocar "Exportar PDF". Safari/iOS a veces
+       arma el nombre sugerido del PDF (al compartir desde el diálogo de
+       impresión) tomando el <title> que ya estaba vigente un rato antes, no el
+       que se cambia recién en el instante de llamar a print(); hacerlo acá
+       elimina esa carrera y el archivo sale nombrado con el paciente, nunca
+       "EcoInforme". Se restaura a "EcoInforme" en openPatient/renderWelcome
+       al salir del editor (ver esas funciones). */
+    if(patient && patient.nombre) document.title = patient.nombre;
     /* El id del estudio nuevo se genera ACÁ, al abrir el editor, no al guardar. Así,
        si "Guardar" falla (o solo parece fallar por una respuesta perdida) y el médico
        lo intenta de nuevo —una o varias veces, incluso en visitas separadas al mismo
@@ -2557,7 +2589,8 @@ const App = (()=>{
     document.getElementById('btnPdf').onclick = async ()=>{
       const paper = document.getElementById('paper');
       if(!paper) return;
-      const nombre = currentStudy ? (currentStudy.p_nombre||'informe')+'_'+(currentStudy.fecha||'') : 'informe';
+      const patientName = (currentStudy && currentStudy.p_nombre) ? currentStudy.p_nombre : 'EcoInforme';
+      const nombreArchivo = currentStudy ? (currentStudy.p_nombre||'informe')+'_'+(currentStudy.fecha||'') : 'informe';
       /* Asegurar que todas las imágenes (logo, firma, ecos) estén cargadas antes de
          imprimir. Tope de 3s por imagen: si una nunca dispara load/error (bloqueada,
          corrupta), no bloquea el botón para siempre — se sigue adelante igual. */
@@ -2573,10 +2606,18 @@ const App = (()=>{
          no clipea texto, mantiene título con contenido, descripción+conclusiones juntas,
          imágenes en hoja nueva). El usuario elige "Guardar como PDF" / "Guardar en Archivos".
          Sugerencia: desactivar "Encabezados y pies de página" para un PDF limpio. */
-      const prevTitle=document.title;
-      document.title=nombre;
+      document.title = nombreArchivo;
+      /* Margen antes de abrir el diálogo de impresión: en iOS/Safari el nombre
+         sugerido del PDF al compartir a veces toma el <title> vigente un instante
+         ANTES de print(), no el que se acaba de asignar en la misma línea — este
+         delay le da tiempo al navegador a registrar el cambio. Como además ya se
+         entra al editor con document.title = nombre del paciente (ver
+         openStudyEditor), aunque este ajuste puntual no llegue a tomar efecto a
+         tiempo, el archivo sigue saliendo con el nombre del paciente y nunca con
+         "EcoInforme". */
+      await new Promise(r=>setTimeout(r, 60));
       try{ window.print(); }
-      finally{ setTimeout(()=>{ document.title=prevTitle; }, 800); }
+      finally{ setTimeout(()=>{ document.title = patientName; }, 800); }
     };
     document.querySelectorAll('.fgroup-head').forEach(h=> h.onclick = ()=> h.parentElement.classList.toggle('open'));
     document.getElementById('btnModeFull').onclick = ()=> setExpress(false);
